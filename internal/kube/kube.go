@@ -35,7 +35,7 @@ func (c Client) RunKubectl(ctx context.Context, args []string, in io.Reader) ([]
 	return c.Run.Run(ctx, "kubectl", c.args(args...), in)
 }
 func labels(owner, route, service string) map[string]any {
-	return map[string]any{ManagedLabel: "dev-cli", OwnerLabel: naming.Slug(owner, 40), RouteLabel: route, ServiceLabel: service, "app.kubernetes.io/name": service, "app.kubernetes.io/managed-by": "dev-cli"}
+	return map[string]any{ManagedLabel: "dev-cli", OwnerLabel: naming.Slug(owner, 40), RouteLabel: route, ServiceLabel: service, "app.kubernetes.io/name": naming.Resource(service, route), "app.kubernetes.io/managed-by": "dev-cli"}
 }
 
 func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, owner, branch, revision, base, route string, expiry time.Time) error {
