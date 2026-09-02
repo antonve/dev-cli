@@ -18,6 +18,7 @@ import (
 	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/gitx"
 	"github.com/antonve/dev-cli/internal/kube"
+	"github.com/antonve/dev-cli/internal/localstate"
 	"github.com/antonve/dev-cli/internal/naming"
 	"github.com/antonve/dev-cli/internal/syncer"
 )
@@ -82,6 +83,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	route := naming.RouteKey(c.owner, branch)
 	k := kube.Client{Run: r, Context: cfg.KubeContext, Namespace: cfg.Namespace}
 	bz := bazel.Bazel{Run: r}
+	local := localstate.New(root, route)
 	switch args[0] {
 	case "doctor":
 		return doctor(ctx, r, cfg, c.base, stdout)
@@ -90,16 +92,20 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "removed %d expired route(s)\n", n)
 		return err
 	case "down":
+		stopped, err := local.Stop()
+		if err != nil {
+			return fmt.Errorf("stop local loop: %w", err)
+		}
 		if err := k.Down(ctx, c.owner, route); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "removed route %s\n", route)
+		fmt.Fprintf(stdout, "removed route %s local-loop-stopped=%t\n", route, stopped)
 		return nil
 	case "logs":
 		return k.Logs(ctx, route, service, stdout, stderr)
 	case "status":
 		_, _ = k.Cleanup(ctx, time.Now())
-		return status(ctx, k, c.owner, branch, route, stdout)
+		return status(ctx, k, c.owner, branch, route, local.Running(), stdout)
 	case "up":
 		_, _ = k.Cleanup(ctx, time.Now())
 		merge, err := g.MergeBase(ctx, c.base)
@@ -143,6 +149,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
 			return nil
 		}
+		if err := local.Write(os.Getpid()); err != nil {
+			return fmt.Errorf("record local loop: %w", err)
+		}
+		defer local.Remove()
 		watchCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		fmt.Fprintln(stdout, "live sync active; press Ctrl-C to stop local loops")
@@ -172,7 +182,7 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 	}
 	return nil
 }
-func status(ctx context.Context, k kube.Client, owner, branch, route string, w io.Writer) error {
+func status(ctx context.Context, k kube.Client, owner, branch, route string, localRunning bool, w io.Writer) error {
 	v, err := k.List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.RouteLabel+"="+route)
 	if err != nil {
 		return err
@@ -194,7 +204,7 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, w i
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		age = time.Since(created).Round(time.Second).String()
 	}
-	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "syncHealth": health, "age": age, "expiresAt": expiresAt}
+	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil
