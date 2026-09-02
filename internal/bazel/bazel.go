@@ -39,7 +39,7 @@ func (b Bazel) Metadata(ctx context.Context, query string, changed []string) ([]
 	}
 	selected := all
 	if len(changed) > 0 {
-		sources, err := b.query(ctx, `kind("source file", //...)`)
+		sources, err := b.query(ctx, `kind("source file", deps(//...))`)
 		if err != nil {
 			return nil, err
 		}
