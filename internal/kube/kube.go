@@ -39,14 +39,14 @@ func labels(owner, route, service string) map[string]any {
 	return map[string]any{ManagedLabel: "dev-cli", OwnerLabel: naming.Slug(owner, 40), RouteLabel: route, ServiceLabel: service, "app.kubernetes.io/name": naming.Resource(service, route), "app.kubernetes.io/managed-by": "dev-cli"}
 }
 
-func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, owner, branch, revision, base, route string, expiry time.Time) error {
+func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
 	name := naming.Resource(d.Name, route)
 	now := time.Now().UTC().Format(time.RFC3339)
 	if existing, err := c.RunKubectl(ctx, []string{"get", "deployment", name, "-o", "jsonpath={.metadata.annotations.dev-cli\\.io/created-at}"}, nil); err == nil && strings.TrimSpace(string(existing)) != "" {
 		now = strings.TrimSpace(string(existing))
 	}
-	ann := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-revision": base, "dev-cli.io/created-at": now, "dev-cli.io/last-sync-at": now, "dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339), "dev-cli.io/cli-version": "v0.1.0"}
-	podAnn := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-revision": base, "dev-cli.io/cli-version": "v0.1.0"}
+	ann := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-ref": baseRef, "dev-cli.io/base-revision": baseRevision, "dev-cli.io/created-at": now, "dev-cli.io/last-sync-at": now, "dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339), "dev-cli.io/cli-version": "v0.1.0"}
+	podAnn := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-ref": baseRef, "dev-cli.io/base-revision": baseRevision, "dev-cli.io/cli-version": "v0.1.0"}
 	lbl := labels(owner, route, d.Name)
 	volumeMounts := []any{map[string]any{"name": "work", "mountPath": "/work"}}
 	command := []any{}

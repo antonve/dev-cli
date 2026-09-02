@@ -129,7 +129,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		expiry := time.Now().Add(ttl)
 		fmt.Fprintf(stdout, "branch=%s owner=%s route=%s base=%s affected=%s\n", branch, c.owner, route, merge, names(ds))
 		for _, d := range ds {
-			if err := k.ApplyOverlay(ctx, cfg, d, c.owner, branch, rev, merge, route, expiry); err != nil {
+			if err := k.ApplyOverlay(ctx, cfg, d, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
 				return err
 			}
 		}
@@ -177,7 +177,24 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, w i
 	if err != nil {
 		return err
 	}
-	out := map[string]any{"owner": owner, "branch": branch, "route": route, "workloads": v.Items}
+	services := make([]map[string]any, 0, len(v.Items))
+	health := "healthy"
+	baseRef, baseRevision, sourceRevision, createdAt, expiresAt := "", "", "", "", ""
+	for _, item := range v.Items {
+		if item.Status.ReadyReplicas < 1 {
+			health = "degraded"
+		}
+		a := item.Metadata.Annotations
+		if baseRef == "" {
+			baseRef, baseRevision, sourceRevision, createdAt, expiresAt = a["dev-cli.io/base-ref"], a["dev-cli.io/base-revision"], a["dev-cli.io/source-revision"], a["dev-cli.io/created-at"], a["dev-cli.io/expires-at"]
+		}
+		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "workload": item.Metadata.Name, "routing": "overlay", "readyReplicas": item.Status.ReadyReplicas})
+	}
+	age := "0s"
+	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		age = time.Since(created).Round(time.Second).String()
+	}
+	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "syncHealth": health, "age": age, "expiresAt": expiresAt}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil

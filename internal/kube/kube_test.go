@@ -25,7 +25,7 @@ func TestOverlayOwnershipAndIsolation(t *testing.T) {
 	r := &captureRunner{}
 	c := Client{Run: r, Context: "dev", Namespace: "ns"}
 	d := config.Deployable{Name: "hello-api", Kind: "backend", Image: "registry/image@sha256:abc", Port: 8081, ReadinessPath: "/readyz", BinaryPath: "/app/hello-api"}
-	if err := c.ApplyOverlay(context.Background(), config.Config{SyncImage: "busybox@sha256:def", Namespace: "ns"}, d, "alice@example.com", "feature/x", "head", "base", "alice-feature-12345678", time.Now().Add(time.Hour)); err != nil {
+	if err := c.ApplyOverlay(context.Background(), config.Config{SyncImage: "busybox@sha256:def", Namespace: "ns"}, d, "alice@example.com", "feature/x", "head", "origin/main", "base", "alice-feature-12345678", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	var list map[string]any
