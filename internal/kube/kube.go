@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -88,6 +89,46 @@ func (c Client) SyncFile(ctx context.Context, pod, local, remote string) error {
 		return err
 	}
 	_, err := c.RunKubectl(ctx, []string{"cp", local, pod + ":" + remote, "-c", "sync"}, nil)
+	return err
+}
+
+// SyncFiles transfers a frontend update in one Kubernetes exec round trip.
+// Paths are archived relative to root and extracted into /workspace by the
+// pinned BusyBox sync sidecar.
+func (c Client) SyncFiles(ctx context.Context, pod, root string, paths []string) error {
+	var payload bytes.Buffer
+	tw := tar.NewWriter(&payload)
+	for _, rel := range paths {
+		local := filepath.Join(root, rel)
+		info, err := os.Stat(local)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		file, err := os.Open(local)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	_, err := c.RunKubectl(ctx, []string{"exec", "-i", pod, "-c", "sync", "--", "tar", "-x", "-C", "/workspace"}, bytes.NewReader(payload.Bytes()))
 	return err
 }
 func (c Client) SyncBinary(ctx context.Context, pod, local, name string) error {

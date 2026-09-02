@@ -69,13 +69,7 @@ func (l Loop) syncFrontend(ctx context.Context, d config.Deployable) error {
 	if err != nil {
 		return err
 	}
-	for _, rel := range d.SyncPaths {
-		local := filepath.Join(l.Root, rel)
-		if err := l.Kube.SyncFile(ctx, p, local, "/workspace/"+filepath.ToSlash(rel)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return l.Kube.SyncFiles(ctx, p, l.Root, d.SyncPaths)
 }
 func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	out, err := l.Bazel.BuildOutput(ctx, d.BuildTarget)
