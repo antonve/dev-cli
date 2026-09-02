@@ -134,6 +134,9 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 					syncErr = l.syncBackend(ctx, d)
 				}
 				if syncErr != nil {
+					// The error is surfaced once for this exact content. A later
+					// edit changes the fingerprint and triggers a fresh attempt.
+					states[i].hash = h
 					report(d.Name + ": " + syncErr.Error())
 					continue
 				}
