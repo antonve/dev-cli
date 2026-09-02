@@ -42,7 +42,11 @@ func labels(owner, route, service string) map[string]any {
 func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, owner, branch, revision, base, route string, expiry time.Time) error {
 	name := naming.Resource(d.Name, route)
 	now := time.Now().UTC().Format(time.RFC3339)
+	if existing, err := c.RunKubectl(ctx, []string{"get", "deployment", name, "-o", "jsonpath={.metadata.annotations.dev-cli\\.io/created-at}"}, nil); err == nil && strings.TrimSpace(string(existing)) != "" {
+		now = strings.TrimSpace(string(existing))
+	}
 	ann := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-revision": base, "dev-cli.io/created-at": now, "dev-cli.io/last-sync-at": now, "dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339), "dev-cli.io/cli-version": "v0.1.0"}
+	podAnn := map[string]any{"dev-cli.io/owner-original": owner, "dev-cli.io/branch-original": branch, "dev-cli.io/source-revision": revision, "dev-cli.io/base-revision": base, "dev-cli.io/cli-version": "v0.1.0"}
 	lbl := labels(owner, route, d.Name)
 	volumeMounts := []any{map[string]any{"name": "work", "mountPath": "/work"}}
 	command := []any{}
@@ -60,7 +64,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		volumes = append(volumes, map[string]any{"name": "workspace", "emptyDir": map[string]any{}})
 	}
 	sync := map[string]any{"name": "sync", "image": cfg.SyncImage, "command": []any{"sh", "-c", "trap : TERM INT; sleep infinity & wait"}, "volumeMounts": syncMounts, "resources": map[string]any{"requests": map[string]any{"cpu": "2m", "memory": "4Mi"}, "limits": map[string]any{"cpu": "100m", "memory": "32Mi"}}, "securityContext": map[string]any{"allowPrivilegeEscalation": false, "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532}}
-	deploy := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"replicas": 1, "selector": map[string]any{"matchLabels": map[string]any{RouteLabel: route, ServiceLabel: d.Name}}, "template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": ann}, "spec": map[string]any{"containers": []any{app, sync}, "volumes": volumes, "securityContext": map[string]any{"fsGroup": 65532}}}}}
+	deploy := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"replicas": 1, "selector": map[string]any{"matchLabels": map[string]any{RouteLabel: route, ServiceLabel: d.Name}}, "template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": podAnn}, "spec": map[string]any{"containers": []any{app, sync}, "volumes": volumes, "securityContext": map[string]any{"fsGroup": 65532}}}}}
 	svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.Port, "targetPort": "http"}}}}
 	list := map[string]any{"apiVersion": "v1", "kind": "List", "items": []any{deploy, svc}}
 	payload, _ := json.Marshal(list)
@@ -73,15 +77,42 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 }
 
 func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (string, error) {
-	out, err := c.RunKubectl(ctx, []string{"get", "pods", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "-o", "jsonpath={.items[0].metadata.name}"}, nil)
+	out, err := c.RunKubectl(ctx, []string{"get", "pods", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "-o", "json"}, nil)
 	if err != nil {
 		return "", err
 	}
-	p := strings.TrimSpace(string(out))
-	if p == "" {
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				Name              string     `json:"name"`
+				DeletionTimestamp *time.Time `json:"deletionTimestamp"`
+			} `json:"metadata"`
+			Status struct {
+				Phase      string `json:"phase"`
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &pods); err != nil {
+		return "", err
+	}
+	for _, pod := range pods.Items {
+		if pod.Metadata.DeletionTimestamp != nil || pod.Status.Phase != "Running" {
+			continue
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				return pod.Metadata.Name, nil
+			}
+		}
+	}
+	if len(pods.Items) == 0 {
 		return "", fmt.Errorf("no pod for %s", d.Name)
 	}
-	return p, nil
+	return "", fmt.Errorf("no ready running pod for %s", d.Name)
 }
 func (c Client) SyncFile(ctx context.Context, pod, local, remote string) error {
 	dir := filepath.Dir(remote)
