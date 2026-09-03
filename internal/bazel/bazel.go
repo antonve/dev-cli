@@ -69,6 +69,18 @@ func (b Bazel) Metadata(ctx context.Context, query string, changed []string) ([]
 	if len(changed) == 0 {
 		selected = nil
 	}
+	return b.metadataForTargets(ctx, selected)
+}
+
+func (b Bazel) AllMetadata(ctx context.Context, query string) ([]config.Deployable, error) {
+	targets, err := b.query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query deployables: %w", err)
+	}
+	return b.metadataForTargets(ctx, targets)
+}
+
+func (b Bazel) metadataForTargets(ctx context.Context, selected []string) ([]config.Deployable, error) {
 	if len(selected) == 0 {
 		return nil, nil
 	}
@@ -98,6 +110,14 @@ func (b Bazel) Metadata(ctx context.Context, query string, changed []string) ([]
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
+}
+
+func (b Bazel) PushImage(ctx context.Context, target, repository, tag string) error {
+	args := []string{"run", "--noshow_progress", target, "--", "--repository", repository, "--tag", tag}
+	if _, err := b.Run.Run(ctx, "bazel", args, nil); err != nil {
+		return fmt.Errorf("push %s to %s:%s: %w", target, repository, tag, err)
+	}
+	return nil
 }
 
 func labelPath(label string) (string, bool) {

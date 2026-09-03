@@ -1,9 +1,14 @@
 # Operations and troubleshooting
 
 - Run `dev doctor` first. It is read-only and checks Git/Bazel, the exact kube
-  context, namespace RBAC, ingress class, and registry endpoint.
+  context, namespace RBAC, ingress class, Gateway API object and route RBAC,
+  and registry endpoint.
 - A backend build error is non-destructive: fix the source and save again; the
   previous process remains running.
+- A backend that builds but fails readiness is automatically replaced with the
+  previous ready binary. Inspect `dev logs <service>` before the next edit.
+- Registry publishing happens before a Deployment changes. A push or digest
+  resolution failure therefore leaves the existing overlay untouched.
 - A sync error is printed with the service name. Check `dev status` and
   `dev logs <service>`, then rerun `dev up`; apply and copy are idempotent.
 - If the local process is interrupted, rerun `dev up` to resume or `dev down`

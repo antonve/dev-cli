@@ -69,7 +69,19 @@ func (l Loop) syncFrontend(ctx context.Context, d config.Deployable) error {
 	if err != nil {
 		return err
 	}
-	return l.Kube.SyncFiles(ctx, p, l.Root, d.SyncPaths)
+	paths, err := files(l.Root, d.SyncPaths)
+	if err != nil {
+		return err
+	}
+	relative := make([]string, 0, len(paths))
+	for _, path := range paths {
+		rel, err := filepath.Rel(l.Root, path)
+		if err != nil {
+			return err
+		}
+		relative = append(relative, rel)
+	}
+	return l.Kube.SyncFiles(ctx, p, l.Root, relative)
 }
 func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	out, err := l.Bazel.BuildOutput(ctx, d.BuildTarget)
@@ -80,7 +92,8 @@ func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	if err != nil {
 		return err
 	}
-	return l.Kube.SyncBinary(ctx, p, out, d.Name)
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)
+	return l.Kube.SyncBinary(ctx, p, out, d.Name, healthURL)
 }
 func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(string)) error {
 	type state struct {

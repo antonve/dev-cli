@@ -7,27 +7,34 @@ import (
 )
 
 type Config struct {
-	KubeContext   string `json:"kubeContext"`
-	Namespace     string `json:"namespace"`
-	Registry      string `json:"registry"`
-	IngressHost   string `json:"ingressHost"`
-	IngressClass  string `json:"ingressClass"`
-	CookieName    string `json:"cookieName"`
-	TTL           string `json:"ttl"`
-	SyncImage     string `json:"syncImage"`
-	MetadataQuery string `json:"metadataQuery"`
+	KubeContext      string `json:"kubeContext"`
+	Namespace        string `json:"namespace"`
+	Registry         string `json:"registry"`
+	IngressHost      string `json:"ingressHost"`
+	IngressClass     string `json:"ingressClass"`
+	GatewayName      string `json:"gatewayName"`
+	GatewayNamespace string `json:"gatewayNamespace"`
+	CookieName       string `json:"cookieName"`
+	TTL              string `json:"ttl"`
+	MetadataQuery    string `json:"metadataQuery"`
 }
 
 type Deployable struct {
 	Name           string   `json:"name"`
 	Kind           string   `json:"kind"`
 	BuildTarget    string   `json:"buildTarget"`
-	Image          string   `json:"image"`
+	ImageName      string   `json:"imageName"`
+	ImageTarget    string   `json:"imageTarget"`
+	PushTarget     string   `json:"pushTarget"`
 	Port           int      `json:"port"`
 	ReadinessPath  string   `json:"readinessPath"`
 	SourceRoots    []string `json:"sourceRoots"`
 	SyncPaths      []string `json:"syncPaths"`
 	BinaryPath     string   `json:"binaryPath"`
+	ContainerPath  string   `json:"containerPath"`
+	DevCommand     []string `json:"devCommand"`
+	PublicPath     string   `json:"publicPath"`
+	InternalHost   string   `json:"internalHost"`
 	MetadataTarget string   `json:"metadataTarget,omitempty"`
 }
 
@@ -45,6 +52,12 @@ func Load(path string) (Config, error) {
 	}
 	if c.IngressClass == "" {
 		c.IngressClass = "nginx"
+	}
+	if c.GatewayName == "" {
+		c.GatewayName = "dev-cli-playground"
+	}
+	if c.GatewayNamespace == "" {
+		c.GatewayNamespace = c.Namespace
 	}
 	if c.CookieName == "" {
 		c.CookieName = "dev_branch"

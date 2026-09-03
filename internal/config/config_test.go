@@ -15,7 +15,10 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.TTL != "8h" || c.MetadataQuery == "" || c.CookieName != "dev_branch" {
+	if c.TTL != "8h" || c.MetadataQuery == "" || c.CookieName != "dev_branch" || c.GatewayName != "dev-cli-playground" {
 		t.Fatalf("defaults missing: %#v", c)
+	}
+	if c.GatewayNamespace != "ns" {
+		t.Fatalf("gateway namespace = %q", c.GatewayNamespace)
 	}
 }
