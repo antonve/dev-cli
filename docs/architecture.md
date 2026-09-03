@@ -1,30 +1,52 @@
 # Architecture and repository contract
 
-The CLI deliberately has no workload catalog. A Bazel repository defines a
-custom `dev_deployable` rule per deployable. That rule depends on the build
-graph it represents and emits JSON containing the runtime kind, image,
-readiness path, build target, and sync roots. `dev up` asks Bazel for all source
-files and uses `rdeps` from changed file targets to those metadata rules. An
-unmapped changed file fails closed by selecting all deployables.
+The CLI deliberately has no workload catalog. A Bazel repository defines one
+`dev_deployable` metadata target per deployable and connects it to the build
+graph it represents. The emitted JSON names logical application image and push
+targets, runtime kind, readiness path, development command, routes, build
+target, and sync roots. Registry locations remain environment configuration.
 
-The default comparison is `merge-base(origin/main, HEAD)`. Names contain a
-readable owner/branch prefix plus a SHA-256-derived suffix. Original owner and
-branch values are retained in annotations. Every resource carries owner,
-route, service, source/base revision, timestamps, expiry, and CLI version.
+`dev up` computes `merge-base(origin/main, HEAD)` by default, asks Bazel `rdeps`
+which metadata targets are affected, builds only their image targets, and runs
+their registry-neutral push targets with a collision-resistant route/revision
+tag. It resolves each published manifest and injects the immutable digest into
+the overlay Deployment. An unmapped changed file fails closed by selecting all
+deployables.
 
-The CLI applies new Deployments and Services and never mutates base workloads.
-Frontend overlays share a writable volume with a minimal sync sidecar; changed
-source files are copied there and the repository's dev server performs HMR.
-Backend overlays run the image's supervisor. Only after a successful Bazel
-build does the CLI copy a staged executable and ask the supervisor to swap it,
-so compile failures leave the last working process untouched.
+Names contain a readable owner/branch prefix plus a SHA-256-derived suffix.
+Original owner and branch values are retained in annotations. Every temporary
+resource carries owner, route, service, source/base revision, timestamps,
+expiry, and CLI version. The CLI never mutates an Argo-owned base Deployment.
 
-The foreground `dev up` process owns local watching. Kubernetes resources are
-explicitly removed with `dev down`; expiry cleanup runs during up/status or via
-`dev cleanup`, so no overlay lifecycle controller is needed.
+## Runtime ownership
 
-Browser routing headers are untrusted. The playground edge router removes
-`x-dev-branch` and recreates it only from the scoped selection cookie. Services
-may propagate that normalized header, but browser traffic cannot bypass the
-router. The CLI uses argument arrays rather than a shell, never reads cluster
-credential files, and only deletes resources bearing its management labels.
+Frontend metadata declares a normal repository-owned pnpm dev command. The CLI
+starts the application image once with that command and copies changed source
+files directly into its writable workspace. Vite, Next.js, TanStack Start, or
+another repository-selected dev server owns filesystem watching and HMR; the
+CLI does not ship a frontend server.
+
+Backend images contain only the application. The CLI injects its own versioned
+POSIX supervisor in a ConfigMap, stages a successfully rebuilt Bazel binary in
+an `emptyDir`, signals the process, and waits for the declared readiness URL.
+Compile failures never touch the running binary. A readiness failure triggers a
+swap back to the previous binary and a second readiness check.
+
+## Routing ownership
+
+The platform supplies a Gateway API implementation and a named Gateway. The
+base application declares ordinary HTTPRoutes. For an active branch the CLI
+creates one temporary HTTPRoute per routable deployable. A public route matches
+the scoped cookie and replaces `x-dev-branch` with the route key; the platform's
+base routes remove an untrusted browser header. An internal route matches the
+normalized header propagated by an application.
+
+Each route chooses its backend independently: affected deployables reference
+their branch Service, while unaffected deployables reference the base Service.
+This preserves partial-overlay fallback and internal-hop affinity without a
+service mesh, application router, Kubernetes discovery in application code, or
+overlay lifecycle controller.
+
+The foreground `dev up` process owns local watching. `dev down` removes only
+objects matching both current owner and route labels. Expiry cleanup runs on
+up/status or through `dev cleanup`.

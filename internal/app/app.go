@@ -20,10 +20,11 @@ import (
 	"github.com/antonve/dev-cli/internal/kube"
 	"github.com/antonve/dev-cli/internal/localstate"
 	"github.com/antonve/dev-cli/internal/naming"
+	"github.com/antonve/dev-cli/internal/registry"
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.1.0"
+const version = "v0.2.0"
 
 type common struct{ config, owner, base string }
 
@@ -124,6 +125,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "no affected deployables")
 			return nil
 		}
+		allDeployables, err := bz.AllMetadata(ctx, cfg.MetadataQuery)
+		if err != nil {
+			return err
+		}
 		rev, err := g.Revision(ctx)
 		if err != nil {
 			return err
@@ -134,10 +139,33 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		expiry := time.Now().Add(ttl)
 		fmt.Fprintf(stdout, "branch=%s owner=%s route=%s base=%s affected=%s\n", branch, c.owner, route, merge, names(ds))
+		affected := make(map[string]bool, len(ds))
+		resolvedImages := make(map[string]string, len(ds))
 		for _, d := range ds {
-			if err := k.ApplyOverlay(ctx, cfg, d, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
+			affected[d.Name] = true
+			tag := route + "-" + shortRevision(rev)
+			repository, tagged, err := registry.Destination(cfg.Registry, d.ImageName, tag)
+			if err != nil {
 				return err
 			}
+			fmt.Fprintf(stdout, "publishing %s to %s\n", d.Name, tagged)
+			if err := bz.PushImage(ctx, d.PushTarget, repository, tag); err != nil {
+				return err
+			}
+			resolved, err := (registry.Resolver{}).Resolve(ctx, tagged)
+			if err != nil {
+				return err
+			}
+			resolvedImages[d.Name] = resolved
+			fmt.Fprintf(stdout, "resolved %s to %s\n", d.Name, resolved)
+		}
+		for _, d := range ds {
+			if err := k.ApplyOverlay(ctx, cfg, d, resolvedImages[d.Name], c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
+				return err
+			}
+		}
+		if err := k.ApplyRoutes(ctx, cfg, allDeployables, affected, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
+			return err
 		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Root: root, Route: route}
 		for _, d := range ds {
@@ -162,6 +190,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
+func shortRevision(revision string) string {
+	if len(revision) > 12 {
+		return revision[:12]
+	}
+	return revision
+}
 func names(ds []config.Deployable) string {
 	v := make([]string, len(ds))
 	for i := range ds {
@@ -170,10 +204,11 @@ func names(ds []config.Deployable) string {
 	return strings.Join(v, ",")
 }
 func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w io.Writer) error {
+	registryHost := strings.Split(c.Registry, "/")[0]
 	checks := []struct {
 		name, cmd string
 		args      []string
-	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", []string{"query", c.MetadataQuery, "--output=label", "--noshow_progress"}}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"namespace-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "deployments", "--namespace", c.Namespace}}, {"ingress-class", "kubectl", []string{"--context", c.KubeContext, "get", "ingressclass", c.IngressClass}}, {"registry", "curl", []string{"-fsS", "-o", "/dev/null", "https://" + c.Registry + "/v2/"}}}
+	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", []string{"query", c.MetadataQuery, "--output=label", "--noshow_progress"}}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"namespace-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "deployments", "--namespace", c.Namespace}}, {"ingress-class", "kubectl", []string{"--context", c.KubeContext, "get", "ingressclass", c.IngressClass}}, {"gateway-api", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.GatewayName, "--namespace", c.GatewayNamespace}}, {"route-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "httproutes.gateway.networking.k8s.io", "--namespace", c.Namespace}}, {"registry", "curl", []string{"-fsS", "-o", "/dev/null", "https://" + registryHost + "/v2/"}}}
 	for _, x := range checks {
 		if _, err := r.Run(ctx, x.cmd, x.args, nil); err != nil {
 			return fmt.Errorf("doctor %s: %w", x.name, err)
@@ -184,6 +219,10 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 }
 func status(ctx context.Context, k kube.Client, owner, branch, route string, localRunning bool, w io.Writer) error {
 	v, err := k.List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.RouteLabel+"="+route)
+	if err != nil {
+		return err
+	}
+	routes, err := k.ListRoutes(ctx, kube.ManagedLabel+"=dev-cli,"+kube.RouteLabel+"="+route)
 	if err != nil {
 		return err
 	}
@@ -204,7 +243,7 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, loc
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		age = time.Since(created).Round(time.Second).String()
 	}
-	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
+	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil

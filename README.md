@@ -33,6 +33,13 @@ safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
 identity. `dev status` prints the collision-resistant route key used by the
 playground branch menu.
 
+Affected application images are built on demand, pushed through repository
+Bazel targets to the registry configured in `.dev/config.json`, resolved to an
+immutable digest, and injected into the overlay. The CLI injects its own backend
+supervisor and Gateway API HTTPRoutes; application repositories do not contain
+CLI runtime tools or routing code. Frontends use their normal pnpm-managed dev
+server (for example Vite, Next.js, or TanStack Start) and native HMR.
+
 See [docs/architecture.md](docs/architecture.md) and
 [docs/troubleshooting.md](docs/troubleshooting.md) for the repository contract,
 security model, lifecycle, and recovery behavior.
