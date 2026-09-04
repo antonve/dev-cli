@@ -11,3 +11,9 @@ func TestLabelPath(t *testing.T) {
 		}
 	}
 }
+
+func TestConfiguredTarget(t *testing.T) {
+	if got, want := configuredTarget("//apps/api:api"), "config(//apps/api:api, target)"; got != want {
+		t.Fatalf("configuredTarget() = %q, want %q", got, want)
+	}
+}
