@@ -138,7 +138,10 @@ func (b Bazel) BuildOutput(ctx context.Context, target string) (string, error) {
 	if _, err := b.Run.Run(ctx, "bazel", []string{"build", target, "--noshow_progress"}, nil); err != nil {
 		return "", err
 	}
-	out, err := b.Run.Run(ctx, "bazel", []string{"cquery", target, "--output=files", "--noshow_progress"}, nil)
+	// A binary reached through an OCI rule may remain in Bazel's query universe
+	// in both target and transitioned configurations. Only the target
+	// configuration is the executable produced by the direct build above.
+	out, err := b.Run.Run(ctx, "bazel", []string{"cquery", configuredTarget(target), "--output=files", "--noshow_progress"}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -148,3 +151,5 @@ func (b Bazel) BuildOutput(ctx context.Context, target string) (string, error) {
 	}
 	return files[0], nil
 }
+
+func configuredTarget(target string) string { return "config(" + target + ", target)" }
