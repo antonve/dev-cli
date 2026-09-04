@@ -3,6 +3,7 @@ package gitx
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/antonve/dev-cli/internal/execx"
@@ -36,11 +37,24 @@ func (g Git) MergeBase(ctx context.Context, base string) (string, error) {
 	return g.one(ctx, "merge-base", base, "HEAD")
 }
 func (g Git) Changed(ctx context.Context, base string) ([]string, error) {
-	b, err := g.Run.Run(ctx, "git", []string{"diff", "--name-only", "--diff-filter=ACMRTUXB", base + "...HEAD"}, nil)
+	b, err := g.Run.Run(ctx, "git", []string{"diff", "--name-only", base}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return strings.Fields(string(b)), nil
+	untracked, err := g.Run.Run(ctx, "git", []string{"ls-files", "--others", "--exclude-standard"}, nil)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, path := range append(strings.Fields(string(b)), strings.Fields(string(untracked))...) {
+		seen[path] = true
+	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 func (g Git) Owner(ctx context.Context) string {
 	if v := execx.EnvOwner(); v != "" {
