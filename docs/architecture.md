@@ -84,3 +84,13 @@ up/status or through `dev cleanup`.
 While the local watcher runs it renews expiry every 30 seconds (or one third
 of a shorter configured TTL). After it stops, the last renewed expiry remains
 the cleanup deadline.
+
+On supported Linux/macOS development hosts, an exclusive file lock admits one
+local `dev up` per checkout and route before publication or cluster mutation.
+A private Unix socket handles status and graceful stop. `dev down` waits for
+that owner to stop before deleting resources; it never signals a stored PID.
+After an abrupt exit the kernel releases the lock and the next invocation
+reclaims the stale socket. Stop older CLI versions before upgrading: legacy
+PID files are intentionally not used to control unknown processes. Different
+checkouts on different machines must use different owner identities if their
+loops are to operate independently.

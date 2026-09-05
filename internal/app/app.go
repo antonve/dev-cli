@@ -108,6 +108,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, _ = k.Cleanup(ctx, time.Now())
 		return status(ctx, k, c.owner, branch, route, local.Running(), stdout)
 	case "up":
+		upCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		release, err := local.Start(stop)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = upCtx
 		_, _ = k.Cleanup(ctx, time.Now())
 		merge, err := g.MergeBase(ctx, c.base)
 		if err != nil {
@@ -184,14 +192,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
 			return nil
 		}
-		if err := local.Write(os.Getpid()); err != nil {
-			return fmt.Errorf("record local loop: %w", err)
-		}
-		defer local.Remove()
-		watchCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-		defer stop()
 		fmt.Fprintln(stdout, "live sync active; press Ctrl-C to stop local loops")
-		return loop.Watch(watchCtx, ds, func(s string) { fmt.Fprintln(stderr, time.Now().Format(time.RFC3339), s) })
+		return loop.Watch(ctx, ds, func(s string) { fmt.Fprintln(stderr, time.Now().Format(time.RFC3339), s) })
 	default:
 		usage(stderr)
 		return fmt.Errorf("unknown command %q", args[0])
