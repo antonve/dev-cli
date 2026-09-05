@@ -167,9 +167,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err := k.ApplyRoutes(ctx, cfg, allDeployables, affected, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
 			return err
 		}
-		loop := syncer.Loop{Bazel: bz, Kube: k, Root: root, Route: route}
+		loop := syncer.Loop{Bazel: bz, Kube: k, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
 		for _, d := range ds {
 			if err := loop.Initial(ctx, d); err != nil {
+				_ = k.RecordSync(ctx, route, d.Name, err)
+				return err
+			}
+			if err := k.RecordSync(ctx, route, d.Name, nil); err != nil {
 				return err
 			}
 		}
@@ -234,10 +238,13 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, loc
 			health = "degraded"
 		}
 		a := item.Metadata.Annotations
+		if a["dev-cli.io/sync-health"] != "healthy" {
+			health = "degraded"
+		}
 		if baseRef == "" {
 			baseRef, baseRevision, sourceRevision, createdAt, expiresAt = a["dev-cli.io/base-ref"], a["dev-cli.io/base-revision"], a["dev-cli.io/source-revision"], a["dev-cli.io/created-at"], a["dev-cli.io/expires-at"]
 		}
-		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "workload": item.Metadata.Name, "routing": "overlay", "readyReplicas": item.Status.ReadyReplicas})
+		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "workload": item.Metadata.Name, "routing": "overlay", "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
 	}
 	age := "0s"
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {

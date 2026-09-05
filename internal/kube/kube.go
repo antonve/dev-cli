@@ -204,17 +204,27 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 }
 
 func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (string, error) {
+	name, _, err := c.PodRuntime(ctx, d, route)
+	return name, err
+}
+
+func (c Client) PodRuntime(ctx context.Context, d config.Deployable, route string) (string, string, error) {
 	out, err := c.RunKubectl(ctx, []string{"get", "pods", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "-o", "json"}, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var pods struct {
 		Items []struct {
 			Metadata struct {
 				Name              string     `json:"name"`
+				UID               string     `json:"uid"`
 				DeletionTimestamp *time.Time `json:"deletionTimestamp"`
 			} `json:"metadata"`
 			Status struct {
+				ContainerStatuses []struct {
+					Name         string `json:"name"`
+					RestartCount int    `json:"restartCount"`
+				} `json:"containerStatuses"`
 				Phase      string `json:"phase"`
 				Conditions []struct {
 					Type   string `json:"type"`
@@ -224,7 +234,7 @@ func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (str
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &pods); err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, pod := range pods.Items {
 		if pod.Metadata.DeletionTimestamp != nil || pod.Status.Phase != "Running" {
@@ -232,14 +242,20 @@ func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (str
 		}
 		for _, condition := range pod.Status.Conditions {
 			if condition.Type == "Ready" && condition.Status == "True" {
-				return pod.Metadata.Name, nil
+				identity := pod.Metadata.UID
+				for _, container := range pod.Status.ContainerStatuses {
+					if container.Name == "app" {
+						identity += ":" + strconv.Itoa(container.RestartCount)
+					}
+				}
+				return pod.Metadata.Name, identity, nil
 			}
 		}
 	}
 	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no pod for %s", d.Name)
+		return "", "", fmt.Errorf("no pod for %s", d.Name)
 	}
-	return "", fmt.Errorf("no ready running pod for %s", d.Name)
+	return "", "", fmt.Errorf("no ready running pod for %s", d.Name)
 }
 
 func (c Client) SyncFile(ctx context.Context, pod, local, remote string) error {
@@ -250,14 +266,27 @@ func (c Client) SyncFile(ctx context.Context, pod, local, remote string) error {
 	return err
 }
 
-func (c Client) SyncFiles(ctx context.Context, pod, root string, paths []string) error {
+func (c Client) SyncFiles(ctx context.Context, pod, root string, paths []string, knownPaths ...string) error {
+	// This manifest records only paths previously copied by this CLI. Never
+	// prune unrelated application files or the dev server's dependency tree.
+	previous, err := c.execShell(ctx, pod, "if [ -f /tmp/dev-cli-synced-files ]; then cat /tmp/dev-cli-synced-files; fi")
+	if err != nil {
+		return err
+	}
+	removed, err := removedSyncPaths(string(previous)+"\n"+strings.Join(knownPaths, "\n"), paths)
+	if err != nil {
+		return err
+	}
 	var payload bytes.Buffer
 	tw := tar.NewWriter(&payload)
 	for _, rel := range paths {
 		local := filepath.Join(root, rel)
-		info, err := os.Stat(local)
+		info, err := os.Lstat(local)
 		if err != nil {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("sync requires a regular file: %s", rel)
 		}
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
@@ -283,8 +312,41 @@ func (c Client) SyncFiles(ctx context.Context, pod, root string, paths []string)
 	if err := tw.Close(); err != nil {
 		return err
 	}
-	_, err := c.RunKubectl(ctx, []string{"exec", "-i", pod, "-c", "app", "--", "tar", "-x", "-C", "/workspace"}, bytes.NewReader(payload.Bytes()))
+	if _, err := c.RunKubectl(ctx, []string{"exec", "-i", pod, "-c", "app", "--", "tar", "-x", "-C", "/workspace"}, bytes.NewReader(payload.Bytes())); err != nil {
+		return err
+	}
+	args := []string{"exec", "-i", pod, "-c", "app", "--", "/bin/sh", "-c", `set -eu
+for path do rm -f -- "/workspace/$path"; done
+cat > /tmp/dev-cli-synced-files.next
+mv /tmp/dev-cli-synced-files.next /tmp/dev-cli-synced-files`, "dev-cli-sync"}
+	_, err = c.RunKubectl(ctx, append(args, removed...), strings.NewReader(strings.Join(paths, "\n")+"\n"))
 	return err
+}
+
+func removedSyncPaths(previous string, paths []string) ([]string, error) {
+	current := make(map[string]bool, len(paths))
+	valid := func(p string) bool {
+		return filepath.IsLocal(p) && filepath.Clean(p) == p && p != "." && !strings.ContainsAny(p, "\n\r\\")
+	}
+	for _, p := range paths {
+		if !valid(p) {
+			return nil, fmt.Errorf("unsafe sync path %q", p)
+		}
+		current[p] = true
+	}
+	var removed []string
+	for _, p := range strings.Split(strings.TrimSuffix(previous, "\n"), "\n") {
+		if p == "" {
+			continue
+		}
+		if !valid(p) {
+			return nil, fmt.Errorf("unsafe recorded sync path %q", p)
+		}
+		if !current[p] {
+			removed = append(removed, p)
+		}
+	}
+	return removed, nil
 }
 
 func (c Client) execShell(ctx context.Context, pod, script string) ([]byte, error) {
@@ -339,6 +401,26 @@ func (c Client) SyncBinary(ctx context.Context, pod, local, name, healthURL stri
 func (c Client) Down(ctx context.Context, owner, route string) error {
 	sel := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
 	_, err := c.RunKubectl(ctx, []string{"delete", "deployment,service,configmap,httproute", "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil)
+	return err
+}
+
+func (c Client) RecordSync(ctx context.Context, route, service string, syncErr error) error {
+	args := []string{"annotate", "deployment", "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + service, "--overwrite"}
+	if syncErr != nil {
+		message := syncErr.Error()
+		if len(message) > 2048 {
+			message = message[:2048]
+		}
+		args = append(args, "dev-cli.io/sync-health=error", "dev-cli.io/sync-error="+message)
+	} else {
+		args = append(args, "dev-cli.io/sync-health=healthy", "dev-cli.io/sync-error-", "dev-cli.io/last-sync-at="+time.Now().UTC().Format(time.RFC3339))
+	}
+	_, err := c.RunKubectl(ctx, args, nil)
+	return err
+}
+
+func (c Client) Heartbeat(ctx context.Context, route string, ttl time.Duration) error {
+	_, err := c.RunKubectl(ctx, []string{"annotate", "deployment,service,configmap,httproute", "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339)}, nil)
 	return err
 }
 func (c Client) Logs(ctx context.Context, route, service string, stdout, stderr io.Writer) error {

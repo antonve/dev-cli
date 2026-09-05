@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -20,6 +21,8 @@ type Loop struct {
 	Bazel       bazel.Bazel
 	Kube        kube.Client
 	Root, Route string
+	TTL         time.Duration
+	KnownFiles  map[string]map[string]bool
 }
 
 func files(root string, roots []string) ([]string, error) {
@@ -28,6 +31,9 @@ func files(root string, roots []string) ([]string, error) {
 		base := filepath.Join(root, r)
 		err := filepath.WalkDir(base, func(p string, d fs.DirEntry, e error) error {
 			if e != nil {
+				if errors.Is(e, fs.ErrNotExist) {
+					return nil
+				}
 				return e
 			}
 			if d.IsDir() {
@@ -60,11 +66,11 @@ func fingerprint(paths []string) (string, error) {
 }
 func (l Loop) Initial(ctx context.Context, d config.Deployable) error {
 	if d.Kind == "frontend" {
-		return l.syncFrontend(ctx, d)
+		return l.syncFrontend(ctx, d, true)
 	}
 	return nil
 }
-func (l Loop) syncFrontend(ctx context.Context, d config.Deployable) error {
+func (l Loop) syncFrontend(ctx context.Context, d config.Deployable, dependenciesChanged bool) error {
 	p, err := l.Kube.Pod(ctx, d, l.Route)
 	if err != nil {
 		return err
@@ -81,7 +87,26 @@ func (l Loop) syncFrontend(ctx context.Context, d config.Deployable) error {
 		}
 		relative = append(relative, rel)
 	}
-	return l.Kube.SyncFiles(ctx, p, l.Root, relative)
+	var known []string
+	for path := range l.KnownFiles[d.Name] {
+		known = append(known, path)
+	}
+	if l.KnownFiles != nil {
+		if l.KnownFiles[d.Name] == nil {
+			l.KnownFiles[d.Name] = map[string]bool{}
+		}
+		for _, path := range relative {
+			l.KnownFiles[d.Name][path] = true
+		}
+	}
+	if err := l.Kube.SyncFiles(ctx, p, l.Root, relative, known...); err != nil {
+		return err
+	}
+	if dependenciesChanged && len(d.DependencyCommand) > 0 {
+		_, err := l.Kube.RunKubectl(ctx, append([]string{"exec", p, "-c", "app", "--"}, d.DependencyCommand...), nil)
+		return err
+	}
+	return nil
 }
 func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	out, err := l.Bazel.BuildOutput(ctx, d.BuildTarget)
@@ -97,8 +122,12 @@ func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 }
 func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(string)) error {
 	type state struct {
-		d    config.Deployable
-		hash string
+		d                config.Deployable
+		hash             string
+		runtime          string
+		dependencyHash   string
+		checkAt, retryAt time.Time
+		failures         int
 	}
 	states := make([]state, 0, len(ds))
 	for _, d := range ds {
@@ -110,16 +139,59 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 		if err != nil {
 			return err
 		}
-		states = append(states, state{d, h})
+		_, runtime, err := l.Kube.PodRuntime(ctx, d, l.Route)
+		if err != nil {
+			return err
+		}
+		dependencyFiles, err := files(l.Root, d.DependencyPaths)
+		if err != nil {
+			return err
+		}
+		dependencyHash, err := fingerprint(dependencyFiles)
+		if err != nil {
+			return err
+		}
+		states = append(states, state{d: d, hash: h, runtime: runtime, dependencyHash: dependencyHash})
 	}
 	t := time.NewTicker(300 * time.Millisecond)
 	defer t.Stop()
+	ttl := l.TTL
+	if ttl <= 0 {
+		ttl = 8 * time.Hour
+	}
+	heartbeat := time.NewTicker(min(30*time.Second, max(ttl/3, time.Second)))
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-heartbeat.C:
+			if err := l.Kube.Heartbeat(ctx, l.Route, ttl); err != nil {
+				report("heartbeat: " + err.Error())
+			}
 		case <-t.C:
 			for i := range states {
+				if time.Now().Before(states[i].retryAt) {
+					continue
+				}
+				if time.Now().After(states[i].checkAt) {
+					states[i].checkAt = time.Now().Add(2 * time.Second)
+					_, runtime, err := l.Kube.PodRuntime(ctx, states[i].d, l.Route)
+					if err != nil {
+						states[i].hash = ""
+						report(states[i].d.Name + ": " + err.Error())
+						if stateErr := l.Kube.RecordSync(ctx, l.Route, states[i].d.Name, err); stateErr != nil {
+							report(stateErr.Error())
+						}
+						states[i].retryAt = time.Now().Add(2 * time.Second)
+						continue
+					}
+					if runtime != states[i].runtime {
+						states[i].hash = ""
+						states[i].dependencyHash = ""
+						states[i].runtime = runtime
+					}
+				}
 				ps, err := files(l.Root, states[i].d.SourceRoots)
 				if err != nil {
 					report(err.Error())
@@ -134,22 +206,43 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 					continue
 				}
 				d := states[i].d
+				dependencyFiles, err := files(l.Root, d.DependencyPaths)
+				if err != nil {
+					report(err.Error())
+					continue
+				}
+				dependencyHash, err := fingerprint(dependencyFiles)
+				if err != nil {
+					report(err.Error())
+					continue
+				}
 				var syncErr error
 				if d.Kind == "frontend" {
-					syncErr = l.syncFrontend(ctx, d)
+					syncErr = l.syncFrontend(ctx, d, dependencyHash != states[i].dependencyHash)
 				} else {
 					syncErr = l.syncBackend(ctx, d)
 				}
 				if syncErr != nil {
-					// The error is surfaced once for this exact content. A later
-					// edit changes the fingerprint and triggers a fresh attempt.
-					states[i].hash = h
+					if err := l.Kube.RecordSync(ctx, l.Route, d.Name, syncErr); err != nil {
+						report(err.Error())
+					}
+					states[i].failures++
+					states[i].retryAt = time.Now().Add(retryDelay(states[i].failures))
 					report(d.Name + ": " + syncErr.Error())
 					continue
 				}
 				states[i].hash = h
+				states[i].dependencyHash = dependencyHash
+				states[i].failures = 0
+				if err := l.Kube.RecordSync(ctx, l.Route, d.Name, nil); err != nil {
+					report(err.Error())
+				}
 				report(d.Name + ": synced")
 			}
 		}
 	}
+}
+
+func retryDelay(failures int) time.Duration {
+	return time.Second * time.Duration(1<<min(max(failures-1, 0), 4))
 }

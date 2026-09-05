@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,21 @@ func (r *captureRunner) Run(_ context.Context, name string, args []string, in io
 		r.payload, _ = io.ReadAll(in)
 	}
 	return nil, nil
+}
+
+func TestSyncDeletionIsLimitedToPreviousManifest(t *testing.T) {
+	removed, err := removedSyncPaths("src/old.ts\nsrc/keep.ts\n", []string{"src/keep.ts", "src/new.ts"})
+	if err != nil || !reflect.DeepEqual(removed, []string{"src/old.ts"}) {
+		t.Fatalf("removed=%v err=%v", removed, err)
+	}
+	for _, bad := range []string{"../outside", "/etc/passwd", "src/../../outside", ".", "src\\other"} {
+		if _, err := removedSyncPaths(bad+"\n", nil); err == nil {
+			t.Fatalf("accepted unsafe prior path %q", bad)
+		}
+		if _, err := removedSyncPaths("", []string{bad}); err == nil {
+			t.Fatalf("accepted unsafe current path %q", bad)
+		}
+	}
 }
 
 type uploadRunner struct {
