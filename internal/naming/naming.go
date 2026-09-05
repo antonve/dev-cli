@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
-	"unicode"
 )
 
 func Slug(s string, limit int) string {
@@ -12,7 +11,7 @@ func Slug(s string, limit int) string {
 	var b strings.Builder
 	dash := false
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
 			b.WriteRune(r)
 			dash = false
 		} else if b.Len() > 0 && !dash {
@@ -42,8 +41,11 @@ func RouteKey(owner, branch string) string {
 
 func Resource(service, route string) string {
 	name := Slug(service, 20) + "-dev-" + route
-	if len(name) <= 63 {
+	// Reserve eight characters for the runtime ConfigMap suffix. Hash the
+	// original inputs whenever truncation or normalization could lose identity.
+	if len(name) <= 55 && service == Slug(service, 20) {
 		return name
 	}
-	return strings.Trim(name[:63], "-")
+	h := sha256.Sum256([]byte(service + "\x00" + route))
+	return Slug(name, 42) + "-" + hex.EncodeToString(h[:6])
 }
