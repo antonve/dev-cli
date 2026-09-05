@@ -46,21 +46,40 @@ swap back to the previous binary and a second readiness check.
 
 ## Routing ownership
 
-The platform supplies a Gateway API implementation and a named Gateway. The
+The current routing adapter requires Envoy Gateway with its Backend extension
+enabled (`config.envoyGateway.extensionApis.enableBackend: true`) and a named
+Gateway. It is not portable to every Gateway API implementation: cookie regex
+matching and health-based failover depend on this provider. The
 base application declares ordinary HTTPRoutes. For an active branch the CLI
 creates one temporary HTTPRoute per routable deployable. A public route matches
 the scoped cookie and replaces `x-dev-branch` with the route key; the platform's
 base routes remove an untrusted browser header. An internal route matches the
 normalized header propagated by an application.
 
-Each route chooses its backend independently: affected deployables reference
-their branch Service, while unaffected deployables reference the base Service.
+Each route chooses its backend independently. Unaffected deployables reference
+the base Service directly. Affected deployables use two Envoy Backend resources:
+the branch Service as the active tier and the base Service as the fallback tier.
+Both reference explicit namespace-local Service DNS names, so deleting the
+branch Service does not invalidate the HTTPRoute's object references. A
+BackendTrafficPolicy checks the declared readiness path every second. Envoy
+selects the base tier when the branch tier is unavailable, even if the local CLI
+is stopped. Failover is eventual, not a zero-error guarantee: health checks,
+DNS, and data-plane configuration take time to converge.
+
+The CLI waits for current-generation HTTPRoute Accepted and ResolvedRefs
+conditions before declaring startup complete. Route admission is reported
+separately from workload readiness; it is not proof that an individual request
+used the overlay. Application diagnostics provide that evidence.
+
 This preserves partial-overlay fallback and internal-hop affinity without a
 service mesh, application router, Kubernetes discovery in application code, or
 overlay lifecycle controller.
 
 The foreground `dev up` process owns local watching. `dev down` removes only
-objects matching both current owner and route labels. Expiry cleanup runs on
+objects matching both current owner and route labels, including the Backend and
+BackendTrafficPolicy resources. Expiry cleanup scans all owned resource kinds,
+so orphan routing objects remain cleanable after their Deployment disappears.
+Expiry cleanup runs on
 up/status or through `dev cleanup`.
 While the local watcher runs it renews expiry every 30 seconds (or one third
 of a shorter configured TTL). After it stops, the last renewed expiry remains

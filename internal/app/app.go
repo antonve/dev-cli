@@ -167,6 +167,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err := k.ApplyRoutes(ctx, cfg, allDeployables, affected, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
 			return err
 		}
+		if err := k.WaitRoutes(ctx, route); err != nil {
+			return err
+		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
 		for _, d := range ds {
 			if err := loop.Initial(ctx, d); err != nil {
@@ -219,6 +222,15 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 		}
 		fmt.Fprintln(w, "ok", x.name)
 	}
+	for _, resource := range []string{"backends.gateway.envoyproxy.io", "backendtrafficpolicies.gateway.envoyproxy.io"} {
+		if _, err := r.Run(ctx, "kubectl", []string{"--context", c.KubeContext, "--namespace", c.Namespace, "get", resource, "-o", "name"}, nil); err != nil {
+			return fmt.Errorf("doctor failover API: %w", err)
+		}
+		if _, err := r.Run(ctx, "kubectl", []string{"--context", c.KubeContext, "--namespace", c.Namespace, "auth", "can-i", "create", resource}, nil); err != nil {
+			return fmt.Errorf("doctor failover RBAC: %w", err)
+		}
+		fmt.Fprintln(w, "ok", resource)
+	}
 	return nil
 }
 func status(ctx context.Context, k kube.Client, owner, branch, route string, localRunning bool, w io.Writer) error {
@@ -247,10 +259,15 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, loc
 		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "workload": item.Metadata.Name, "routing": "overlay", "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
 	}
 	age := "0s"
+	routingHealth := "ready"
+	if !routes.RoutesReady() {
+		routingHealth = "pending-or-degraded"
+	}
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		age = time.Since(created).Round(time.Second).String()
 	}
 	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
+	out["routingHealth"] = routingHealth
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil
