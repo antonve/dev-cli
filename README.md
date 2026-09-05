@@ -43,3 +43,7 @@ server (for example Vite, Next.js, or TanStack Start) and native HMR.
 See [docs/architecture.md](docs/architecture.md) and
 [docs/troubleshooting.md](docs/troubleshooting.md) for the repository contract,
 security model, lifecycle, and recovery behavior.
+
+[Installation and onboarding](docs/installation.md) covers private-module
+credentials and the target repository contract. [Contributing](docs/contributing.md)
+describes the local build and release gates.
