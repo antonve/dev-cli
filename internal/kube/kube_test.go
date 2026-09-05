@@ -1,11 +1,16 @@
 package kube
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +19,51 @@ import (
 	"github.com/antonve/dev-cli/internal/config"
 	"github.com/antonve/dev-cli/internal/naming"
 )
+
+func TestSyncExtractionKeepsUnchangedFilesAndRefreshesChangedMtime(t *testing.T) {
+	destination := t.TempDir()
+	path := filepath.Join(destination, "App.tsx")
+	old := time.Unix(100, 0)
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, contents := range []string{"old", "new", "NEW"} {
+		var archive bytes.Buffer
+		tw := tar.NewWriter(&archive)
+		if err := tw.WriteHeader(&tar.Header{Name: "App.tsx", Mode: 0600, Size: 3, ModTime: old}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(contents)); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", syncExtractScript, "test", destination, "App.tsx")
+		cmd.Stdin = &archive
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("extract: %v: %s", err, output)
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != contents {
+			t.Fatalf("contents=%q err=%v", data, err)
+		}
+		if unchanged := after.ModTime().Equal(before.ModTime()); unchanged != (contents == "old") {
+			t.Fatalf("contents=%q: unexpected mtime before=%v after=%v", contents, before.ModTime(), after.ModTime())
+		}
+	}
+}
 
 type captureRunner struct{ payload []byte }
 
