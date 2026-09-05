@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	ManagedLabel = "dev-cli.io/managed-by"
-	RouteLabel   = "dev-cli.io/route"
-	OwnerLabel   = "dev-cli.io/owner"
-	ServiceLabel = "dev-cli.io/service"
-	cliVersion   = "v0.2.0"
+	ManagedLabel   = "dev-cli.io/managed-by"
+	RouteLabel     = "dev-cli.io/route"
+	OwnerLabel     = "dev-cli.io/owner"
+	ServiceLabel   = "dev-cli.io/service"
+	cliVersion     = "v0.2.0"
+	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
 )
 
 // Runtime tooling belongs to the CLI. Backend repositories provide only an
@@ -166,8 +167,11 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			continue
 		}
 		backend := d.Name
+		backendRefs := []any{map[string]any{"name": backend, "port": d.Port}}
 		if affected[d.Name] {
-			backend = naming.Resource(d.Name, route)
+			failover, refs := c.failoverResources(d, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
+			items = append(items, failover...)
+			backendRefs = refs
 		}
 		matches, hostnames, filters := []any{}, []any{}, []any{}
 		if d.PublicPath != "" {
@@ -190,7 +194,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 				"hostnames":  hostnames,
 				"rules": []any{map[string]any{
 					"matches": matches, "filters": filters,
-					"backendRefs": []any{map[string]any{"name": backend, "port": d.Port}},
+					"backendRefs": backendRefs,
 				}},
 			},
 		})
@@ -400,7 +404,7 @@ func (c Client) SyncBinary(ctx context.Context, pod, local, name, healthURL stri
 
 func (c Client) Down(ctx context.Context, owner, route string) error {
 	sel := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
-	_, err := c.RunKubectl(ctx, []string{"delete", "deployment,service,configmap,httproute", "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil)
+	_, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil)
 	return err
 }
 
@@ -420,7 +424,7 @@ func (c Client) RecordSync(ctx context.Context, route, service string, syncErr e
 }
 
 func (c Client) Heartbeat(ctx context.Context, route string, ttl time.Duration) error {
-	_, err := c.RunKubectl(ctx, []string{"annotate", "deployment,service,configmap,httproute", "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339)}, nil)
+	_, err := c.RunKubectl(ctx, []string{"annotate", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339)}, nil)
 	return err
 }
 func (c Client) Logs(ctx context.Context, route, service string, stdout, stderr io.Writer) error {
@@ -435,6 +439,7 @@ type ObjectList struct {
 	Items []struct {
 		Kind     string `json:"kind"`
 		Metadata struct {
+			Generation  int64             `json:"generation"`
 			Name        string            `json:"name"`
 			Creation    string            `json:"creationTimestamp"`
 			Labels      map[string]string `json:"labels"`
@@ -442,6 +447,13 @@ type ObjectList struct {
 		} `json:"metadata"`
 		Status struct {
 			ReadyReplicas int `json:"readyReplicas"`
+			Parents       []struct {
+				Conditions []struct {
+					Type               string `json:"type"`
+					Status             string `json:"status"`
+					ObservedGeneration int64  `json:"observedGeneration"`
+				} `json:"conditions"`
+			} `json:"parents"`
 		} `json:"status"`
 	} `json:"items"`
 }
@@ -465,23 +477,80 @@ func (c Client) ListRoutes(ctx context.Context, selector string) (ObjectList, er
 	return v, err
 }
 func (c Client) Cleanup(ctx context.Context, now time.Time) (int, error) {
-	v, err := c.List(ctx, ManagedLabel+"=dev-cli")
+	out, err := c.RunKubectl(ctx, []string{"get", ownedResources, "-l", ManagedLabel + "=dev-cli", "-o", "json"}, nil)
 	if err != nil {
 		return 0, err
 	}
-	routes := map[string]bool{}
+	var v ObjectList
+	if err := json.Unmarshal(out, &v); err != nil {
+		return 0, err
+	}
+	expiries := map[string]time.Time{}
 	for _, i := range v.Items {
 		exp, err := time.Parse(time.RFC3339, i.Metadata.Annotations["dev-cli.io/expires-at"])
-		if err == nil && now.After(exp) {
-			routes[i.Metadata.Labels[RouteLabel]] = true
+		route := i.Metadata.Labels[RouteLabel]
+		if err == nil && route != "" && exp.After(expiries[route]) {
+			expiries[route] = exp
 		}
 	}
-	for route := range routes {
-		if _, err := c.RunKubectl(ctx, []string{"delete", "deployment,service,configmap,httproute", "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--ignore-not-found=true"}, nil); err != nil {
-			return len(routes), err
+	removed := 0
+	for route, expiry := range expiries {
+		if !now.After(expiry) {
+			continue
+		}
+		if _, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--ignore-not-found=true"}, nil); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func (v ObjectList) RoutesReady() bool {
+	if len(v.Items) == 0 {
+		return false
+	}
+	for _, route := range v.Items {
+		ready := false
+		for _, parent := range route.Status.Parents {
+			accepted, resolved := false, false
+			for _, condition := range parent.Conditions {
+				if condition.Status != "True" || condition.ObservedGeneration != route.Metadata.Generation {
+					continue
+				}
+				if condition.Type == "Accepted" {
+					accepted = true
+				}
+				if condition.Type == "ResolvedRefs" {
+					resolved = true
+				}
+			}
+			ready = ready || accepted && resolved
+		}
+		if !ready {
+			return false
 		}
 	}
-	return len(routes), nil
+	return true
+}
+
+func (c Client) WaitRoutes(ctx context.Context, route string) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	for {
+		v, err := c.ListRoutes(ctx, ManagedLabel+"=dev-cli,"+RouteLabel+"="+route)
+		if err != nil {
+			return err
+		}
+		if v.RoutesReady() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("branch routes were not accepted with resolved backends: %w", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 func ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }

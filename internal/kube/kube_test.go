@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/naming"
 )
 
 type captureRunner struct{ payload []byte }
@@ -125,9 +127,74 @@ func TestRoutesUseOverlayAndBaseIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := list["items"].([]any)
-	publicBackend := items[0].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
-	internalBackend := items[1].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
-	if publicBackend != "hello-api-dev-alice-feature-12345678" || internalBackend != "echo-api" {
+	publicBackend := items[3].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
+	internalBackend := items[4].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
+	if publicBackend != naming.Resource("active-hello-api", "alice-feature-12345678") || internalBackend != "echo-api" {
 		t.Fatalf("backends public=%v internal=%v", publicBackend, internalBackend)
+	}
+	for i, want := range []bool{false, true} {
+		item := items[i].(map[string]any)
+		spec := item["spec"].(map[string]any)
+		if item["kind"] != "Backend" || spec["fallback"] != want {
+			t.Fatalf("wrong failover tier: %#v", item)
+		}
+		fqdn := spec["endpoints"].([]any)[0].(map[string]any)["fqdn"].(map[string]any)["hostname"].(string)
+		if !strings.HasSuffix(fqdn, ".ns.svc.cluster.local") {
+			t.Fatalf("backend escaped namespace: %s", fqdn)
+		}
+	}
+}
+
+func TestRouteAdmissionMustMatchCurrentGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		status     string
+		generation int
+		want       bool
+	}{{"True", 2, true}, {"False", 2, false}, {"True", 1, false}} {
+		var routes ObjectList
+		data := fmt.Sprintf(`{"items":[{"metadata":{"generation":2},"status":{"parents":[{"conditions":[{"type":"Accepted","status":%q,"observedGeneration":%d},{"type":"ResolvedRefs","status":"True","observedGeneration":2}]}]}}]}`, tc.status, tc.generation)
+		if err := json.Unmarshal([]byte(data), &routes); err != nil {
+			t.Fatal(err)
+		}
+		if got := routes.RoutesReady(); got != tc.want {
+			t.Fatalf("status=%s generation=%d: got %v", tc.status, tc.generation, got)
+		}
+	}
+	if (ObjectList{}).RoutesReady() {
+		t.Fatal("missing routes reported ready")
+	}
+}
+
+type cleanupRunner struct {
+	captureRunner
+	objects string
+	deleted []string
+}
+
+func (r *cleanupRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
+	if args[4] == "get" {
+		if args[5] != ownedResources {
+			return nil, fmt.Errorf("cleanup did not scan all owned resources")
+		}
+		return []byte(r.objects), nil
+	}
+	r.deleted = append(r.deleted, strings.Join(args, " "))
+	return nil, nil
+}
+
+func TestCleanupIncludesOrphanRoutesAndKeepsRenewedGroups(t *testing.T) {
+	r := &cleanupRunner{objects: `{"items":[
+		{"kind":"HTTPRoute","metadata":{"labels":{"dev-cli.io/route":"orphan"},"annotations":{"dev-cli.io/expires-at":"2026-01-01T00:00:00Z"}}},
+		{"kind":"Backend","metadata":{"labels":{"dev-cli.io/route":"active"},"annotations":{"dev-cli.io/expires-at":"2026-01-01T00:00:00Z"}}},
+		{"kind":"Deployment","metadata":{"labels":{"dev-cli.io/route":"active"},"annotations":{"dev-cli.io/expires-at":"2026-01-03T00:00:00Z"}}},
+		{"kind":"Backend","metadata":{"labels":{},"annotations":{"dev-cli.io/expires-at":"2026-01-01T00:00:00Z"}}}
+	]}`}
+	c := Client{Run: r, Context: "dev", Namespace: "ns"}
+	n, err := c.Cleanup(context.Background(), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil || n != 1 || len(r.deleted) != 1 {
+		t.Fatalf("removed=%d deletes=%v err=%v", n, r.deleted, err)
+	}
+	if !strings.Contains(r.deleted[0], ManagedLabel+"=dev-cli,"+RouteLabel+"=orphan") || !strings.Contains(r.deleted[0], ownedResources) {
+		t.Fatalf("unsafe or incomplete cleanup: %s", r.deleted[0])
 	}
 }

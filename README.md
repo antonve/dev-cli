@@ -36,7 +36,7 @@ playground branch menu.
 Affected application images are built on demand, pushed through repository
 Bazel targets to the registry configured in `.dev/config.json`, resolved to an
 immutable digest, and injected into the overlay. The CLI injects its own backend
-supervisor and Gateway API HTTPRoutes; application repositories do not contain
+supervisor and Envoy Gateway routing resources; application repositories do not contain
 CLI runtime tools or routing code. Frontends use their normal pnpm-managed dev
 server (for example Vite, Next.js, or TanStack Start) and native HMR.
 
