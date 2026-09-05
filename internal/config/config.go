@@ -20,22 +20,24 @@ type Config struct {
 }
 
 type Deployable struct {
-	Name           string   `json:"name"`
-	Kind           string   `json:"kind"`
-	BuildTarget    string   `json:"buildTarget"`
-	ImageName      string   `json:"imageName"`
-	ImageTarget    string   `json:"imageTarget"`
-	PushTarget     string   `json:"pushTarget"`
-	Port           int      `json:"port"`
-	ReadinessPath  string   `json:"readinessPath"`
-	SourceRoots    []string `json:"sourceRoots"`
-	SyncPaths      []string `json:"syncPaths"`
-	BinaryPath     string   `json:"binaryPath"`
-	ContainerPath  string   `json:"containerPath"`
-	DevCommand     []string `json:"devCommand"`
-	PublicPath     string   `json:"publicPath"`
-	InternalHost   string   `json:"internalHost"`
-	MetadataTarget string   `json:"metadataTarget,omitempty"`
+	Name              string   `json:"name"`
+	Kind              string   `json:"kind"`
+	BuildTarget       string   `json:"buildTarget"`
+	ImageName         string   `json:"imageName"`
+	ImageTarget       string   `json:"imageTarget"`
+	PushTarget        string   `json:"pushTarget"`
+	Port              int      `json:"port"`
+	ReadinessPath     string   `json:"readinessPath"`
+	SourceRoots       []string `json:"sourceRoots"`
+	SyncPaths         []string `json:"syncPaths"`
+	DependencyPaths   []string `json:"dependencyPaths"`
+	DependencyCommand []string `json:"dependencyCommand"`
+	BinaryPath        string   `json:"binaryPath"`
+	ContainerPath     string   `json:"containerPath"`
+	DevCommand        []string `json:"devCommand"`
+	PublicPath        string   `json:"publicPath"`
+	InternalHost      string   `json:"internalHost"`
+	MetadataTarget    string   `json:"metadataTarget,omitempty"`
 }
 
 func Load(path string) (Config, error) {

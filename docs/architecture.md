@@ -26,6 +26,18 @@ files directly into its writable workspace. Vite, Next.js, TanStack Start, or
 another repository-selected dev server owns filesystem watching and HMR; the
 CLI does not ship a frontend server.
 
+Only declared `syncPaths` are copied. Deleted files are removed using the
+CLI's prior file manifest; dependency trees and unrelated files are retained.
+`dependencyPaths` identify manifests and lockfiles, and `dependencyCommand`
+declares the repository's install command. Include those paths in both
+`sourceRoots` and `syncPaths`. The command runs after initial sync, changes to
+those dependency inputs, or container replacement—not on ordinary source edits.
+
+Watch retries unsuccessful transfers with a bounded backoff and checks pod UID
+and app restart count every two seconds. A replacement runtime receives the
+current local contents even if no further file is edited. Sync errors and last
+successful sync time are recorded on the owned Deployment for `dev status`.
+
 Backend images contain only the application. The CLI injects its own versioned
 POSIX supervisor in a ConfigMap, stages a successfully rebuilt Bazel binary in
 an `emptyDir`, signals the process, and waits for the declared readiness URL.
@@ -50,3 +62,6 @@ overlay lifecycle controller.
 The foreground `dev up` process owns local watching. `dev down` removes only
 objects matching both current owner and route labels. Expiry cleanup runs on
 up/status or through `dev cleanup`.
+While the local watcher runs it renews expiry every 30 seconds (or one third
+of a shorter configured TTL). After it stops, the last renewed expiry remains
+the cleanup deadline.
