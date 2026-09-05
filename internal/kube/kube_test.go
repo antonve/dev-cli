@@ -128,6 +128,11 @@ func TestRoutesUseOverlayAndBaseIndependently(t *testing.T) {
 	}
 	items := list["items"].([]any)
 	publicBackend := items[3].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
+	filters := items[3].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["filters"]
+	encoded, _ := json.Marshal(filters)
+	if !strings.Contains(string(encoded), `"name":"Cache-Control","value":"no-store"`) || !strings.Contains(string(encoded), `"name":"Vary","value":"Cookie"`) {
+		t.Fatalf("public routes allow cross-branch browser caching: %s", encoded)
+	}
 	internalBackend := items[4].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
 	if publicBackend != naming.Resource("active-hello-api", "alice-feature-12345678") || internalBackend != "echo-api" {
 		t.Fatalf("backends public=%v internal=%v", publicBackend, internalBackend)

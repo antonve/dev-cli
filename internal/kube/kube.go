@@ -178,6 +178,8 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			hostnames = append(hostnames, cfg.IngressHost)
 			matches = append(matches, map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + cfg.CookieName + "=" + route + "(;.*|$)"}}})
 			filters = append(filters, map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}})
+			// URLs are shared by all branches: never reuse another cookie's response.
+			filters = append(filters, map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}}}})
 		} else {
 			hostnames = append(hostnames, d.InternalHost)
 			matches = append(matches, map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}})
