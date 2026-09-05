@@ -30,6 +30,7 @@ func (c Client) failoverResources(d config.Deployable, owner, branch, revision, 
 		"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy",
 		"metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)},
 		"spec": map[string]any{
+			"dns":         map[string]any{"dnsRefreshRate": "1s", "respectDnsTtl": false},
 			"targetRefs":  []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name}},
 			"healthCheck": map[string]any{"active": map[string]any{"type": "HTTP", "interval": "1s", "timeout": "1s", "healthyThreshold": 1, "unhealthyThreshold": 1, "http": map[string]any{"path": d.ReadinessPath}}},
 		},

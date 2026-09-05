@@ -198,6 +198,11 @@ func TestRoutesUseOverlayAndBaseIndependently(t *testing.T) {
 			t.Fatalf("backend escaped namespace: %s", fqdn)
 		}
 	}
+	policy := items[2].(map[string]any)["spec"].(map[string]any)
+	dns := policy["dns"].(map[string]any)
+	if dns["dnsRefreshRate"] != "1s" || dns["respectDnsTtl"] != false {
+		t.Fatalf("overlay DNS convergence is unbounded by the development interval: %#v", dns)
+	}
 }
 
 func TestRouteAdmissionMustMatchCurrentGeneration(t *testing.T) {
