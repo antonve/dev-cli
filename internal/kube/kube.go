@@ -178,6 +178,8 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			hostnames = append(hostnames, cfg.IngressHost)
 			matches = append(matches, map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + cfg.CookieName + "=" + route + "(;.*|$)"}}})
 			filters = append(filters, map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}})
+			// URLs are shared by all branches: never reuse another cookie's response.
+			filters = append(filters, map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}}}})
 		} else {
 			hostnames = append(hostnames, d.InternalHost)
 			matches = append(matches, map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}})
@@ -316,16 +318,32 @@ func (c Client) SyncFiles(ctx context.Context, pod, root string, paths []string,
 	if err := tw.Close(); err != nil {
 		return err
 	}
-	if _, err := c.RunKubectl(ctx, []string{"exec", "-i", pod, "-c", "app", "--", "tar", "-x", "-C", "/workspace"}, bytes.NewReader(payload.Bytes())); err != nil {
+	args := []string{"exec", "-i", pod, "-c", "app", "--", "/bin/sh", "-c", syncExtractScript, "dev-cli-extract", "/workspace"}
+	if _, err := c.RunKubectl(ctx, append(args, paths...), bytes.NewReader(payload.Bytes())); err != nil {
 		return err
 	}
-	args := []string{"exec", "-i", pod, "-c", "app", "--", "/bin/sh", "-c", `set -eu
+	args = []string{"exec", "-i", pod, "-c", "app", "--", "/bin/sh", "-c", `set -eu
 for path do rm -f -- "/workspace/$path"; done
 cat > /tmp/dev-cli-synced-files.next
 mv /tmp/dev-cli-synced-files.next /tmp/dev-cli-synced-files`, "dev-cli-sync"}
 	_, err = c.RunKubectl(ctx, append(args, removed...), strings.NewReader(strings.Join(paths, "\n")+"\n"))
 	return err
 }
+
+// Tar timestamps lose subsecond precision. Copy only differing bytes from a
+// temporary extraction so rapid same-size edits get fresh filesystem mtimes,
+// without touching unchanged Vite configuration and forcing server restarts.
+const syncExtractScript = `set -eu
+destination=$1
+shift
+stage=$(mktemp -d /tmp/dev-cli-sync.XXXXXX)
+trap 'rm -rf -- "$stage"' EXIT
+tar -x -C "$stage"
+for path do
+  if cmp -s "$stage/$path" "$destination/$path"; then continue; fi
+  mkdir -p -- "$destination/$(dirname -- "$path")"
+  cp -- "$stage/$path" "$destination/$path"
+done`
 
 func removedSyncPaths(previous string, paths []string) ([]string, error) {
 	current := make(map[string]bool, len(paths))
