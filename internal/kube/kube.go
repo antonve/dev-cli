@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -310,10 +311,18 @@ func (c Client) waitReady(ctx context.Context, pod string, after int, healthURL 
 }
 func (c Client) SyncBinary(ctx context.Context, pod, local, name, healthURL string) error {
 	before := c.generation(ctx, pod)
-	if err := c.SyncFile(ctx, pod, local, "/work/next"); err != nil {
+	// The supervisor must never observe a binary while it is being copied.
+	// Interrupted uploads are inert; only a completed upload becomes next.
+	upload := "/work/upload-" + rand.Text()
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = c.execShell(cleanup, pod, "rm -f "+upload)
+	}()
+	if err := c.SyncFile(ctx, pod, local, upload); err != nil {
 		return err
 	}
-	if _, err := c.execShell(ctx, pod, "chmod 0555 /work/next && kill -TERM \"$(cat /work/pid)\""); err != nil {
+	if _, err := c.execShell(ctx, pod, "chmod 0555 "+upload+" && mv "+upload+" /work/next && kill -TERM \"$(cat /work/pid)\""); err != nil {
 		return err
 	}
 	if err := c.waitReady(ctx, pod, before, healthURL, 10*time.Second); err == nil {

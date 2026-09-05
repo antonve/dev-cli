@@ -3,7 +3,9 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,46 @@ func (r *captureRunner) Run(_ context.Context, name string, args []string, in io
 		r.payload, _ = io.ReadAll(in)
 	}
 	return nil, nil
+}
+
+type uploadRunner struct {
+	captureRunner
+	fail               bool
+	upload, activation string
+}
+
+func (r *uploadRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
+	joined := strings.Join(args, " ")
+	if len(args) > 4 && args[4] == "cp" {
+		r.upload = args[6]
+		if r.fail {
+			return nil, errors.New("interrupted copy")
+		}
+	}
+	if strings.Contains(joined, "&& mv ") {
+		r.activation = joined
+	}
+	return []byte("1"), nil
+}
+
+func TestBinaryUploadIsPublishedOnlyAfterSuccessfulCopy(t *testing.T) {
+	for _, fail := range []bool{true, false} {
+		r := &uploadRunner{fail: fail}
+		c := Client{Run: r, Context: "dev", Namespace: "ns"}
+		err := c.SyncBinary(context.Background(), "pod", "/local/binary", "api", "http://localhost:8080/readyz")
+		if (err != nil) != fail {
+			t.Fatalf("fail=%v: %v", fail, err)
+		}
+		if !strings.HasPrefix(r.upload, "pod:/work/upload-") {
+			t.Fatalf("unsafe upload: %q", r.upload)
+		}
+		if fail && r.activation != "" {
+			t.Fatal("failed upload was activated")
+		}
+		if !fail && !strings.Contains(r.activation, " /work/next && kill -TERM ") {
+			t.Fatal("completed upload not atomically published before restart")
+		}
+	}
 }
 func (r *captureRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
 	return nil
