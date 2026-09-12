@@ -10,11 +10,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/deeplink"
 	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/naming"
 )
@@ -24,7 +26,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	cliVersion     = "v0.2.0"
+	cliVersion     = "v0.3.0"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
 )
 
@@ -162,6 +164,14 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 // use an overlay while unaffected services use their always-running base.
 func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables []config.Deployable, affected map[string]bool, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
 	created, items := time.Now().UTC().Format(time.RFC3339), []any{}
+	ttl := 8 * time.Hour
+	if cfg.TTL != "" {
+		var err error
+		ttl, err = time.ParseDuration(cfg.TTL)
+		if err != nil || ttl < time.Second {
+			return fmt.Errorf("ttl must be a duration of at least 1s")
+		}
+	}
 	for _, d := range deployables {
 		if d.PublicPath == "" && d.InternalHost == "" {
 			continue
@@ -176,13 +186,20 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		matches, hostnames, filters := []any{}, []any{}, []any{}
 		if d.PublicPath != "" {
 			hostnames = append(hostnames, cfg.IngressHost)
-			matches = append(matches, map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + cfg.CookieName + "=" + route + "(;.*|$)"}}})
+			matches = append(matches, map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + regexp.QuoteMeta(cfg.CookieName) + "=" + regexp.QuoteMeta(route) + "(;.*|$)"}}})
 			filters = append(filters, map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}})
 			// URLs are shared by all branches: never reuse another cookie's response.
 			filters = append(filters, map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}}}})
 		} else {
 			hostnames = append(hostnames, d.InternalHost)
 			matches = append(matches, map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}})
+		}
+		rules := []any{map[string]any{"matches": matches, "filters": filters, "backendRefs": backendRefs}}
+		if d.PublicPath != "" {
+			rules = append(rules, selectionRule(cfg, d, route, int(ttl.Seconds()), backendRefs))
+			// Each owner carries an identical base-selection rule. There is no
+			// shared mutable CLI resource and down/TTL remain owner-scoped.
+			rules = append(rules, selectionRule(cfg, d, deeplink.Base, 0, []any{map[string]any{"name": d.Name, "port": d.Port}}))
 		}
 		items = append(items, map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -194,10 +211,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			"spec": map[string]any{
 				"parentRefs": []any{map[string]any{"name": cfg.GatewayName, "namespace": cfg.GatewayNamespace}},
 				"hostnames":  hostnames,
-				"rules": []any{map[string]any{
-					"matches": matches, "filters": filters,
-					"backendRefs": backendRefs,
-				}},
+				"rules":      rules,
 			},
 		})
 	}
