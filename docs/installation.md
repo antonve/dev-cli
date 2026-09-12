@@ -66,13 +66,16 @@ dev doctor
 dev up --owner alice                    # merge-base with origin/main
 dev up --owner alice --base origin/next # alternative comparison base
 dev status --owner alice
+dev url --owner alice '/settings?tab=profile'
+dev url --owner alice --clear '/settings'
 dev logs --owner alice hello-api        # flags before positional service
 dev down --owner alice
 dev cleanup
 ```
 
-Choose the emitted route key in the browser menu, not the raw Git branch name.
-The key includes the owner so two developers can use the same branch name.
+Open the emitted environment URL, or use `dev url` for a deep link. Envoy sets
+the cookie without an application menu or handler. The key includes the owner
+so two developers can use the same branch name. See [deep links](deep-links.md).
 Ctrl-C stops the foreground loop but retains overlays for inspection. Restart
 with the same checkout/owner/branch, or use `dev down` for explicit cleanup.
 Stop an older CLI before upgrading; v0.2.0 does not signal legacy PID files.

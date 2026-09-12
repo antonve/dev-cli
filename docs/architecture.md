@@ -46,6 +46,11 @@ swap back to the previous binary and a second readiness check.
 
 ## Routing ownership
 
+Browser selection uses [gateway-owned deep links](deep-links.md): `dev up` and
+`dev status` expose URLs, while `dev url` preserves a supplied deep destination.
+GET/HEAD query matches override old cookies and set/clear the cookie at Envoy.
+Guest frontends need no dev-specific code.
+
 The current routing adapter requires Envoy Gateway with its Backend extension
 enabled (`config.envoyGateway.extensionApis.enableBackend: true`) and a named
 Gateway. It is not portable to every Gateway API implementation: cookie regex

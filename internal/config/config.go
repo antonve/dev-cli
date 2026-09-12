@@ -3,7 +3,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -64,8 +66,14 @@ func Load(path string) (Config, error) {
 	if c.CookieName == "" {
 		c.CookieName = "dev_branch"
 	}
+	if err := (&http.Cookie{Name: c.CookieName, Value: "route"}).Valid(); err != nil {
+		return Config{}, fmt.Errorf("invalid cookieName: %w", err)
+	}
 	if c.TTL == "" {
 		c.TTL = "8h"
+	}
+	if ttl, err := time.ParseDuration(c.TTL); err != nil || ttl < time.Second {
+		return Config{}, fmt.Errorf("ttl must be a duration of at least 1s")
 	}
 	if c.MetadataQuery == "" {
 		c.MetadataQuery = "kind(dev_deployable, //...)"

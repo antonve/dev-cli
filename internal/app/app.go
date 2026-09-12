@@ -15,6 +15,7 @@ import (
 
 	"github.com/antonve/dev-cli/internal/bazel"
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/deeplink"
 	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/gitx"
 	"github.com/antonve/dev-cli/internal/kube"
@@ -24,7 +25,7 @@ import (
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.2.0"
+const version = "v0.3.0"
 
 type common struct{ config, owner, base string }
 
@@ -37,7 +38,7 @@ func flags(name string) (*flag.FlagSet, *common) {
 	return f, c
 }
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: dev <doctor|up|status|logs|down|cleanup|version> [options]")
+	fmt.Fprintln(w, "usage: dev <doctor|up|url|status|logs|down|cleanup|version> [options]")
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -60,6 +61,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	f, c := flags(args[0])
 	noWatch := false
+	clearSelection := false
+	if args[0] == "url" {
+		f.BoolVar(&clearSelection, "clear", false, "link to base and clear the branch cookie")
+	}
 	if args[0] == "up" {
 		f.BoolVar(&noWatch, "no-watch", false, "create and initially sync overlays, then exit")
 	}
@@ -82,6 +87,21 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	route := naming.RouteKey(c.owner, branch)
+	if args[0] == "url" {
+		if f.NArg() > 1 {
+			return errors.New("usage: dev url [--owner owner] [--clear] [/path?query#fragment]")
+		}
+		selection := route
+		if clearSelection {
+			selection = deeplink.Base
+		}
+		link, err := deeplink.URL(cfg.IngressHost, f.Arg(0), selection)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, link)
+		return nil
+	}
 	k := kube.Client{Run: r, Context: cfg.KubeContext, Namespace: cfg.Namespace}
 	bz := bazel.Bazel{Run: r}
 	local := localstate.New(root, route)
@@ -106,8 +126,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return k.Logs(ctx, route, service, stdout, stderr)
 	case "status":
 		_, _ = k.Cleanup(ctx, time.Now())
-		return status(ctx, k, c.owner, branch, route, local.Running(), stdout)
+		return status(ctx, k, cfg, c.owner, branch, route, local.Running(), stdout)
 	case "up":
+		openURL, err := deeplink.URL(cfg.IngressHost, "/", route)
+		if err != nil {
+			return err
+		}
+		baseURL, _ := deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
 		upCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		release, err := local.Start(stop)
@@ -188,6 +213,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 		}
+		fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
 		if noWatch {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
 			return nil
@@ -235,7 +261,7 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 	}
 	return nil
 }
-func status(ctx context.Context, k kube.Client, owner, branch, route string, localRunning bool, w io.Writer) error {
+func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch, route string, localRunning bool, w io.Writer) error {
 	v, err := k.List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.RouteLabel+"="+route)
 	if err != nil {
 		return err
@@ -270,6 +296,8 @@ func status(ctx context.Context, k kube.Client, owner, branch, route string, loc
 	}
 	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
 	out["routingHealth"] = routingHealth
+	out["url"], _ = deeplink.URL(cfg.IngressHost, "/", route)
+	out["baseURL"], _ = deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil

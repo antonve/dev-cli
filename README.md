@@ -21,6 +21,8 @@ use Bazel.
 dev doctor
 dev up                         # compare with merge-base(origin/main, HEAD)
 dev up --base origin/other     # explicit comparison base
+dev url '/settings?tab=profile' # clickable branch link; no cluster mutation
+dev url --clear '/settings'     # select base and clear the branch cookie
 dev status
 dev logs [service]
 dev down
@@ -30,8 +32,11 @@ dev cleanup                    # remove expired dev-cli overlays
 `dev up` stays in the foreground and supervises live updates. Stop it with
 Ctrl-C; the Kubernetes resources remain until `dev down` or TTL cleanup. It is
 safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
-identity. `dev status` prints the collision-resistant route key used by the
-playground branch menu.
+identity. `dev up` prints clickable environment and base links; `dev status`
+includes both URLs. Envoy selects the branch and sets the browser cookie from
+the `dev-branch` query parameter, with no frontend integration or manual menu.
+Existing paths, query parameters and fragments are preserved. See
+[deep links](docs/deep-links.md) for selection precedence and limits.
 
 Affected application images are built on demand, pushed through repository
 Bazel targets to the registry configured in `.dev/config.json`, resolved to an
@@ -47,3 +52,10 @@ security model, lifecycle, and recovery behavior.
 [Installation and onboarding](docs/installation.md) covers private-module
 credentials and the target repository contract. [Contributing](docs/contributing.md)
 describes the local build and release gates.
+
+## Agent skill
+
+The portable [dev-cli skill](skills/dev-cli/SKILL.md) teaches agents the actual
+startup, live-edit, deep-link, verification and cleanup workflow. Install that
+folder into your agent's skills directory (for Codex, `$CODEX_HOME/skills` or
+`~/.codex/skills`). It does not grant cluster or registry permissions.
