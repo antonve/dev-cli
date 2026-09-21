@@ -67,6 +67,45 @@ func TestSyncExtractionKeepsUnchangedFilesAndRefreshesChangedMtime(t *testing.T)
 
 type captureRunner struct{ payload []byte }
 
+type delayedPodRunner struct {
+	captureRunner
+	created, running bool
+	creationError    error
+}
+
+func (r *delayedPodRunner) Run(ctx context.Context, name string, args []string, in io.Reader) ([]byte, error) {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--for=create") {
+		if r.creationError != nil {
+			return nil, r.creationError
+		}
+		r.created = true
+		return nil, nil
+	}
+	if strings.Contains(joined, "--for=jsonpath={.status.phase}=Running") {
+		if !r.created {
+			return nil, errors.New("error: no matching resources found")
+		}
+		r.running = true
+	}
+	return r.captureRunner.Run(ctx, name, args, in)
+}
+
+func TestFrontendWaitsForDeploymentToCreatePod(t *testing.T) {
+	for _, creationError := range []error{nil, context.DeadlineExceeded, context.Canceled} {
+		r := &delayedPodRunner{creationError: creationError}
+		c := Client{Run: r, Context: "dev", Namespace: "apps"}
+		d := config.Deployable{Name: "web", Kind: "frontend", Port: 3000, ReadinessPath: "/"}
+		err := c.ApplyOverlay(context.Background(), config.Config{Namespace: "apps"}, d, "image", "alice", "branch", "rev", "main", "base", "route", time.Now().Add(time.Hour))
+		if !errors.Is(err, creationError) {
+			t.Fatalf("creation error=%v: ApplyOverlay returned %v", creationError, err)
+		}
+		if r.running != (creationError == nil) {
+			t.Fatalf("creation error=%v: running wait reached=%v", creationError, r.running)
+		}
+	}
+}
+
 func (r *captureRunner) Run(_ context.Context, name string, args []string, in io.Reader) ([]byte, error) {
 	if in != nil {
 		r.payload, _ = io.ReadAll(in)
