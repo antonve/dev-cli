@@ -17,6 +17,7 @@ import (
 
 	"github.com/antonve/dev-cli/internal/config"
 	"github.com/antonve/dev-cli/internal/deeplink"
+	"github.com/antonve/dev-cli/internal/document"
 	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/naming"
 )
@@ -128,11 +129,11 @@ func loadPodTemplate(path, route, namespace string) (map[string]any, error) {
 	}
 	b = []byte(strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(string(b)))
 	var template map[string]any
-	if err := json.Unmarshal(b, &template); err != nil {
+	if err := document.Unmarshal(b, &template); err != nil {
 		return nil, fmt.Errorf("parse workload template %s: %w", path, err)
 	}
 	if template["apiVersion"] != nil || template["kind"] != nil {
-		return nil, fmt.Errorf("workload template %s must be a PodTemplateSpec JSON object", path)
+		return nil, fmt.Errorf("workload template %s must be a PodTemplateSpec YAML or JSON object", path)
 	}
 	return template, nil
 }

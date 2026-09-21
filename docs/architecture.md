@@ -18,7 +18,7 @@ Original owner and branch values are retained in annotations. Every temporary
 resource carries owner, route, service, source/base revision, timestamps,
 expiry, and CLI version. The CLI never mutates an Argo-owned base Deployment.
 
-Deployables may name a repository-relative JSON `workloadTemplate` containing a
+Deployables may name a repository-relative YAML or JSON `workloadTemplate` containing a
 Kubernetes `PodTemplateSpec` and a `devContainer`. The CLI preserves its pod
 spec—including service accounts, projected volumes, Secret references,
 resources, working directory, arguments and probes—then changes the designated
@@ -139,8 +139,8 @@ overlay lifecycle controller.
 
 ## Dependencies and tasks
 
-`.dev/config.json` may declare environment-owned dependency manifests and named
-task Jobs as repository-relative JSON. `dev provision` and `dev task` are
+`.dev/config.yaml` (or `.dev/config.json`) may declare environment-owned dependency manifests and named
+task Jobs as repository-relative YAML or JSON. `dev provision` and `dev task` are
 explicit operations; `dev up --dependency ... --task ...` runs provision →
 readiness → tasks in flag order before applying an overlay. A failed task aborts
 that up invocation before workload publication or creation. Ordinary `dev up`

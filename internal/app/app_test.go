@@ -102,4 +102,22 @@ func TestURLCommandNeedsOnlyGitAndConfig(t *testing.T) {
 	if err := Run(context.Background(), []string{"url", "--owner", "alice", "https://evil.test/"}, &out, &out); err == nil {
 		t.Fatal("accepted external destination")
 	}
+	if err := os.WriteFile(".dev/config.yaml", []byte("kubeContext: dev\nnamespace: ns\nregistry: registry.test\ningressHost: yaml.dev.lab\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, explicit := range []bool{true, false} {
+		args := []string{"url", "--owner", "alice"}
+		if explicit {
+			args = append(args, "--config", ".dev/config.yaml")
+		} else if err := os.Remove(".dev/config.json"); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err := Run(context.Background(), args, &out, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.String(), "https://yaml.dev.lab/") {
+			t.Fatalf("YAML command selected wrong config: %s", out.String())
+		}
+	}
 }

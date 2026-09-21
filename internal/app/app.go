@@ -44,7 +44,7 @@ func (v *stringsFlag) Set(value string) error {
 func flags(name string) (*flag.FlagSet, *common) {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
 	c := &common{}
-	f.StringVar(&c.config, "config", ".dev/config.json", "repository config")
+	f.StringVar(&c.config, "config", "", "repository config (discover .dev/config.yaml or .dev/config.json)")
 	f.StringVar(&c.owner, "owner", "", "owner identity")
 	f.StringVar(&c.base, "base", "origin/main", "comparison base")
 	return f, c

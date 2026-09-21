@@ -1,6 +1,6 @@
 ---
 name: dev-cli
-description: Run and verify branch-isolated Kubernetes development environments with the dev CLI in repositories containing .dev/config.json and Bazel dev_deployable metadata. Use for live frontend/backend edits, clickable environment links, status, logs, handoff and scoped cleanup; not for production deployment or generic local dev servers.
+description: Run and verify branch-isolated Kubernetes development environments with the dev CLI in repositories containing .dev/config.yaml or .dev/config.json and Bazel dev_deployable metadata. Use for live frontend/backend edits, clickable environment links, status, logs, handoff and scoped cleanup; not for production deployment or generic local dev servers.
 ---
 
 # Develop with dev-cli
@@ -11,7 +11,9 @@ require dev-cli v0.3.0 or newer and routes created by that version.
 
 ## Establish the environment
 
-- Read repository instructions and `.dev/config.json`. Confirm the configured
+- Read repository instructions and `.dev/config.yaml` (or legacy `.dev/config.json`).
+  If both exist, use `--config <path>` consistently to select the intended environment.
+  Confirm the configured
   context, all allowed namespaces/hosts, registry, dependency and task target
   are within the user's task authority.
   The skill grants no additional deployment, cleanup or publication permission.

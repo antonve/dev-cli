@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/document"
 	"github.com/antonve/dev-cli/internal/naming"
 )
 
@@ -30,7 +31,7 @@ func readObjects(path, route, namespace string) ([]map[string]any, error) {
 	}
 	b = []byte(strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(string(b)))
 	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
+	if err := document.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("parse manifest %s: %w", path, err)
 	}
 	if raw["kind"] == "List" {

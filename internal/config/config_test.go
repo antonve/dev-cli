@@ -38,6 +38,38 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestDiscoverYAMLAndLegacyJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir(".dev", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(""); err == nil {
+		t.Fatal("missing config accepted")
+	}
+	if err := os.WriteFile(".dev/config.json", []byte(`{"kubeContext":"json","namespace":"ns","registry":"registry.test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(""); err != nil || got.KubeContext != "json" {
+		t.Fatalf("JSON fallback = %+v, %v", got, err)
+	}
+	yaml := "kubeContext: yaml\nnamespace: ns\nregistry: registry.test\nbazelArgs: [--config=agent]\n"
+	if err := os.WriteFile(".dev/config.yaml", []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "--config") {
+		t.Fatalf("ambiguous config = %v", err)
+	}
+	if got, err := Load(".dev/config.yaml"); err != nil || got.KubeContext != "yaml" || len(got.BazelArgs) != 1 {
+		t.Fatalf("explicit YAML = %+v, %v", got, err)
+	}
+	if err := os.Remove(".dev/config.json"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(""); err != nil || got.KubeContext != "yaml" {
+		t.Fatalf("YAML discovery = %+v, %v", got, err)
+	}
+}
+
 func TestDependencyAndTaskValidation(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.json")
 	valid := `{"kubeContext":"dev","namespace":"apps","namespaces":["apps","data"],"registry":"registry.test","dependencies":[{"name":"postgres","namespace":"data","manifest":"deps/postgres.json","readiness":[{"resource":"postgresql","name":"db-${DEV_ROUTE}","jsonPath":".status.PostgresClusterStatus","value":"Running"}]}],"tasks":[{"name":"migrate","namespace":"apps","manifest":"tasks/migrate.json","target":"postgres.data","dependencies":["postgres"]}]}`

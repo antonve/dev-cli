@@ -11,7 +11,7 @@ keeps frontend file sync or backend binary restart loops running.
 go install github.com/antonve/dev-cli/cmd/dev@latest
 ```
 
-The target repository supplies `.dev/config.json` and Bazel
+The target repository supplies `.dev/config.yaml` (or legacy `.dev/config.json`) and Bazel
 `dev_deployable` targets. The CLI itself is an ordinary Go module and does not
 use Bazel.
 
@@ -53,7 +53,7 @@ Authentication proxy hops use a separate `X-Dev-Proxy-Backend` header. See
 internal-hop and uninstrumented-base limitations.
 
 Affected application images are built on demand, pushed through repository
-Bazel targets to the registry configured in `.dev/config.json`, resolved to an
+Bazel targets to the configured registry, resolved to an
 immutable digest, and injected into the overlay. The CLI injects its own backend
 supervisor and Envoy Gateway routing resources; application repositories do not contain
 CLI runtime tools or routing code. Frontends use their normal pnpm-managed dev
