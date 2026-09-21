@@ -17,3 +17,11 @@
   to remove the route. Abandoned resources expire according to repository TTL.
 - The branch menu takes the `route` shown by `dev up` or `dev status`, not a raw
   branch name, preventing collisions between owners using identical branches.
+- Dependency reprovisioning is intentionally immutable. A manifest-hash error
+  means the route needs a new dependency name/route; the CLI will not apply over
+  a live database. `retain` objects survive config edits, down, and TTL.
+- A timed-out task leaves its Lease held while the Job may still run. Inspect
+  the named Job. A later invocation can recover after the Job is deleted or has
+  a terminal Complete/Failed condition; expiry alone never proves it stopped.
+- For operator resources without standard conditions, use `jsonPath` and
+  `value` readiness (for example PostgresClusterStatus = Running).

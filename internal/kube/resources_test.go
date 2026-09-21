@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/naming"
 )
 
 type resourceRunner struct {
-	objects map[string][]byte
-	deletes []string
-	failJob bool
+	objects   map[string][]byte
+	deletes   []string
+	calls     []string
+	failJob   bool
+	activeJob bool
 }
 
 func (r *resourceRunner) key(args []string, kind, name string) string {
@@ -24,6 +27,11 @@ func (r *resourceRunner) key(args []string, kind, name string) string {
 }
 func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.Reader) ([]byte, error) {
 	verb := args[4]
+	r.calls = append(r.calls, strings.Join(args, " "))
+	if verb == "apply" && strings.Contains(strings.Join(args, " "), "--dry-run=server") {
+		b, _ := io.ReadAll(in)
+		return b, nil
+	}
 	if verb == "get" {
 		return r.objects[r.key(args, args[5], args[6])], nil
 	}
@@ -60,15 +68,34 @@ func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.R
 			metadata["resourceVersion"] = "2"
 		}
 		if kind == "Job" {
-			if r.failJob {
-				item["status"] = map[string]any{"failed": 1}
+			if r.activeJob {
+				item["status"] = map[string]any{"active": 1}
+			} else if r.failJob {
+				item["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Failed", "status": "True"}}}
 			} else {
-				item["status"] = map[string]any{"succeeded": 1}
+				item["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Complete", "status": "True"}}}
 			}
 		}
 		r.objects[key], _ = json.Marshal(item)
 	}
 	return nil, nil
+}
+
+func TestProvisionJSONPathReadiness(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := osWrite("postgres.json", `{"apiVersion":"acid.zalan.do/v1","kind":"postgresql","metadata":{"name":"db-${DEV_ROUTE}"},"spec":{}}`); err != nil {
+		t.Fatal(err)
+	}
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	d := config.Dependency{Name: "db", Namespace: "apps", Manifest: "postgres.json", Retention: "retain", Readiness: []config.Readiness{{Resource: "postgresql", Name: "db-${DEV_ROUTE}", JSONPath: ".status.PostgresClusterStatus", Value: "Running"}}}
+	if err := c.Provision(context.Background(), d, "alice", "route-a"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.calls, "\n")
+	if !strings.Contains(joined, `--for=jsonpath={.status.PostgresClusterStatus}=Running`) || strings.Contains(joined, "condition=jsonpath") {
+		t.Fatalf("invalid readiness command:\n%s", joined)
+	}
 }
 func (*resourceRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
 	return nil
@@ -107,15 +134,68 @@ func TestTaskTargetLeaseSerializesAcrossTasksAndOwners(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}
 	a := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
-	release, err := c.acquireTaskLock(context.Background(), a, "route-a/migrate", time.Minute)
+	release, err := c.acquireTaskLock(context.Background(), a, "locks", "apps/route-a/migrate", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release()
+	var encoded struct {
+		Spec struct {
+			RenewTime string `json:"renewTime"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(r.objects["locks/lease/"+lockName(a.Target)], &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := time.Parse(microTimeFormat, encoded.Spec.RenewTime); err != nil {
+		t.Fatalf("invalid Kubernetes MicroTime %q: %v", encoded.Spec.RenewTime, err)
+	}
 	b := a
 	b.Name = "seed"
-	if _, err := c.acquireTaskLock(context.Background(), b, "route-b/seed", time.Minute); err == nil || !strings.Contains(err.Error(), "locked") {
+	if _, err := c.acquireTaskLock(context.Background(), b, "locks", "other/route-b/seed", time.Minute); err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("second lock = %v", err)
+	}
+}
+
+func TestExpiredLeaseDoesNotBypassActiveJob(t *testing.T) {
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
+	release, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/route-a/migrate", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	var held map[string]any
+	key := "locks/lease/" + lockName(task.Target)
+	if err := json.Unmarshal(r.objects[key], &held); err != nil {
+		t.Fatal(err)
+	}
+	held["spec"].(map[string]any)["renewTime"] = time.Now().Add(-time.Hour).Format(time.RFC3339)
+	r.objects[key], _ = json.Marshal(held)
+	r.objects["apps/job/"+naming.Resource("migrate", "route-a")] = []byte(`{"status":{"active":1}}`)
+	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/route-b/seed", time.Minute); err == nil {
+		t.Fatal("expired lock bypassed active Job")
+	}
+}
+
+func TestTaskTimeoutRetainsLockWhileJobMayRun(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := osWrite("job.json", `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"ignored"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"migrate","image":"migration"}]}}}}`); err != nil {
+		t.Fatal(err)
+	}
+	r := &resourceRunner{objects: map[string][]byte{}, activeJob: true}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Manifest: "job.json", Target: "postgres.apps", Timeout: "20ms"}
+	if err := c.RunTask(context.Background(), task, "locks", "", "rev", "alice", "route-a"); err == nil {
+		t.Fatal("expected timeout")
+	}
+	var held lease
+	if err := json.Unmarshal(r.objects["locks/lease/"+lockName(task.Target)], &held); err != nil {
+		t.Fatal(err)
+	}
+	if held.Spec.Holder == "" {
+		t.Fatal("active task lock was released")
 	}
 }
 
@@ -127,11 +207,11 @@ func TestFailedTaskReturnsBeforeDependentStartup(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}, failJob: true}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}
 	task := config.Task{Name: "migrate", Namespace: "apps", Manifest: "job.json", Target: "postgres.apps", Timeout: "1s"}
-	err := c.RunTask(context.Background(), task, "", "revision", "alice", "route-a")
+	err := c.RunTask(context.Background(), task, "locks", "", "revision", "alice", "route-a")
 	if err == nil || !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("task error = %v", err)
 	}
-	if len(r.deletes) != 1 || !strings.Contains(r.deletes[0], "job migrate-dev-route-a") {
+	if len(r.deletes) != 1 || !strings.Contains(r.deletes[0], "delete jobs -l") || !strings.Contains(r.deletes[0], ServiceLabel+"=migrate") {
 		t.Fatalf("unsafe rerun cleanup: %v", r.deletes)
 	}
 }

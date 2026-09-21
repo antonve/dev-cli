@@ -12,7 +12,8 @@ require dev-cli v0.3.0 or newer and routes created by that version.
 ## Establish the environment
 
 - Read repository instructions and `.dev/config.json`. Confirm the configured
-  context, namespace, registry and hostname are within the user's task authority.
+  context, all allowed namespaces/hosts, registry, dependency and task target
+  are within the user's task authority.
   The skill grants no additional deployment, cleanup or publication permission.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
   `dev doctor`. Doctor is a prerequisite check, not an end-to-end build or routing
@@ -32,7 +33,16 @@ Make the intended service edits **before** `dev up --owner <owner>`. Uncommitted
 edits count. The CLI uses the merge base with `origin/main` (or `--base <ref>`)
 and Bazel reverse dependencies to select services once at startup. Unknown files
 conservatively select all deployables. If adding another service later, stop and
-rerun the loop; do not claim automatic expansion of the affected set.
+rerun the loop with repeatable `--service <name>`; do not claim automatic
+expansion or infer related services.
+
+Provision only explicitly requested dependencies with `dev provision <name>` or
+`dev up --dependency <name>`. `retain` dependencies deliberately survive down
+and TTL. Run repository-defined migrations/seeds with `dev task <name>` or `dev
+up --task <name>`; an initialization up must name every declared `startupTask`.
+A failed/timed-out task blocks overlay startup and never triggers reset. Never
+delete a task Lease to bypass serialization; use the normal retry only after the
+prior Job is absent or terminal.
 
 Keep `dev up` running in a durable terminal/session supported by the environment.
 Record the exact checkout, branch, owner and terminal/log handle. Do not launch
@@ -45,8 +55,9 @@ sync and is not live development.
 - Backend: the loop builds the affected Bazel binary, uploads it, restarts the
   supervised process in the same pod and waits for readiness. Compile failures
   retain the working process. Readiness failure restores the previous binary.
-- Read errors from the loop, `dev status --owner <owner>` and
-  `dev logs --owner <owner> <service>` (flags precede positional arguments).
+- Read errors from the loop, `dev status --owner <owner>`, aggregate `dev logs
+  --owner <owner>`, or filtered `dev logs --owner <owner> <service>` (flags
+  precede positional arguments).
   Fix source/config errors within scope; stop for missing authority or unsafe
   infrastructure changes rather than bypassing the CLI.
 
@@ -56,6 +67,7 @@ Return the actual **Open environment** URL printed after startup, or run:
 
 ```sh
 dev url --owner <owner> '/desired/path?existing=value#section'
+dev url --owner <owner> --host account.dev.lab '/desired/path'
 dev url --owner <owner> --clear '/desired/path?existing=value#section'
 ```
 
@@ -72,8 +84,9 @@ on POST or other mutation methods. Unknown/deleted selections do not create an
 overlay; normal existing-cookie/base routing applies. Base-clear rules exist
 while at least one v0.3+ environment has routes on that host.
 
-The cookie is shared across tabs in the same browser profile. Use separate
-profiles/isolated contexts for simultaneous environments. Lab DNS/network/CA
+The cookie is shared across tabs for one host in the same browser profile;
+configured public hosts are selected independently. Use separate profiles or
+isolated contexts for simultaneous selections on one host. Lab DNS/network/CA
 access is still required. Links are not authentication or access control.
 
 ## Prove the result and hand off
@@ -99,6 +112,7 @@ use `dev down --owner <owner>` from the same branch/checkout to stop the local
 loop and remove only that environment. Ctrl-C alone leaves Kubernetes resources.
 
 `dev cleanup` is broader: it removes expired CLI-owned environments across owners
-in the configured namespace. Up/status also perform expiry maintenance. Do not
+in configured namespaces, but never retained dependency data. Up/status also
+perform expiry maintenance. Do not
 use cleanup to delete another active environment or imply that expiry has an
 always-running reaper. Never delete base/Argo resources or unrelated resources.

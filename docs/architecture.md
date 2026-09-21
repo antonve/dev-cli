@@ -18,6 +18,15 @@ Original owner and branch values are retained in annotations. Every temporary
 resource carries owner, route, service, source/base revision, timestamps,
 expiry, and CLI version. The CLI never mutates an Argo-owned base Deployment.
 
+Deployables may name a repository-relative JSON `workloadTemplate` containing a
+Kubernetes `PodTemplateSpec` and a `devContainer`. The CLI preserves its pod
+spec—including service accounts, projected volumes, Secret references,
+resources, working directory, arguments and probes—then changes the designated
+container's image/runtime fields. It replaces all pod labels with isolated
+selector labels, so a base Service cannot select an overlay. Template
+`initContainers` are rejected: migrations and seeds use declared tasks instead.
+`${DEV_ROUTE}` and `${DEV_NAMESPACE}` are the only substitutions.
+
 ## Runtime ownership
 
 Frontend metadata declares a normal repository-owned pnpm dev command. The CLI
@@ -26,8 +35,13 @@ files directly into its writable workspace. Vite, Next.js, TanStack Start, or
 another repository-selected dev server owns filesystem watching and HMR; the
 CLI does not ship a frontend server.
 
-Only declared `syncPaths` are copied. Deleted files are removed using the
-CLI's prior file manifest; dependency trees and unrelated files are retained.
+Only declared `syncPaths` are copied. Git's tracked plus unignored-untracked set
+is the upper bound, so ignored private/generated files are not transferred.
+The CLI also excludes `.env*`, dependency trees, Bazel outputs, `.next`, `dist`,
+and coverage by default; `syncExcludes` adds repository-relative
+`filepath.Match` patterns. Symlink escapes are rejected. `syncRoot` and
+`syncStripPrefix` map repository paths to the image layout. Deleted files are
+removed using the CLI's prior file manifest; unrelated files are retained.
 `dependencyPaths` identify manifests and lockfiles, and `dependencyCommand`
 declares the repository's install command. Include those paths in both
 `sourceRoots` and `syncPaths`. The command runs after initial sync, changes to
@@ -55,11 +69,17 @@ The current routing adapter requires Envoy Gateway with its Backend extension
 enabled (`config.envoyGateway.extensionApis.enableBackend: true`) and a named
 Gateway. It is not portable to every Gateway API implementation: cookie regex
 matching and health-based failover depend on this provider. The
-base application declares ordinary HTTPRoutes. For an active branch the CLI
-creates one temporary HTTPRoute per routable deployable. A public route matches
+base application declares ordinary HTTPRoutes. Deployables independently name
+their workload namespace, public host, overlay Service port, and base Service
+name/namespace/port. A public route matches
 the scoped cookie and replaces `x-dev-branch` with the route key; the platform's
 base routes remove an untrusted browser header. An internal route matches the
-normalized header propagated by an application.
+normalized header propagated by an application. When `publicProxy` is set, the
+public route always targets that authentication proxy and the overlay is
+reachable only through the separate `internalHost` route. This keeps
+Oathkeeper or another existing boundary in front of both selected and base
+traffic. The proxy/application remains responsible for propagating normalized
+context internally; a browser header cannot override the public route's value.
 
 Each route chooses its backend independently. Unaffected deployables reference
 the base Service directly. Affected deployables use two Envoy Backend resources:
@@ -82,6 +102,33 @@ used the overlay. Application diagnostics provide that evidence.
 This preserves partial-overlay fallback and internal-hop affinity without a
 service mesh, application router, Kubernetes discovery in application code, or
 overlay lifecycle controller.
+
+## Dependencies and tasks
+
+`.dev/config.json` may declare environment-owned dependency manifests and named
+task Jobs as repository-relative JSON. `dev provision` and `dev task` are
+explicit operations; `dev up --dependency ... --task ...` runs provision →
+readiness → task before applying an overlay. When initialization is requested,
+a deployable's `startupTasks` must all be explicitly supplied. Ordinary
+shared-base `dev up` does not run them.
+
+Dependency objects must be namespaced in an allowed namespace. Server dry-run
+proves their scope; Secret and cluster-scoped objects are rejected. Atomic
+create plus an immutable manifest hash prevents cross-owner adoption races and
+makes identical reprovisioning idempotent. Readiness supports either a standard
+`condition` or `jsonPath` plus `value`. Retention is written on each object:
+`retain` is the default and survives down/TTL, while `down` is removed only
+after live ownership and persisted retention are verified. A later config edit
+cannot turn retained data into disposable data.
+
+Tasks accept exactly one Job and preserve its Secret references. A `target`
+identifies the mutated database/environment; one Lease in the shared
+`taskLockNamespace` serializes it across task names, owners and Job namespaces.
+A lock is released only after a terminal Complete or Failed Job condition.
+After interruption, an expired Lease is reusable only when the prior Job is
+absent or terminal. Optional `imageName`, `pushTarget` and `container` fields
+publish the current source revision and inject its digest. Without them, the
+manifest's explicitly pinned image owns provenance.
 
 The foreground `dev up` process owns local watching. `dev down` removes only
 objects matching both current owner and route labels, including the Backend and

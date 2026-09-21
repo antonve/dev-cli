@@ -27,6 +27,14 @@ type Loop struct {
 	KnownFiles  map[string]map[string]bool
 }
 
+func (l Loop) podRuntime(ctx context.Context, d config.Deployable) (string, string, error) {
+	k := l.Kube.In(d.WorkloadNamespace(l.Config))
+	if d.Kind == "frontend" {
+		return k.RunningPodRuntime(ctx, d, l.Route)
+	}
+	return k.PodRuntime(ctx, d, l.Route)
+}
+
 func files(r execx.Runner, root string, roots, excludes []string) ([]string, error) {
 	if len(roots) == 0 {
 		return nil, nil
@@ -179,7 +187,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 		if err != nil {
 			return err
 		}
-		_, runtime, err := l.Kube.In(d.WorkloadNamespace(l.Config)).PodRuntime(ctx, d, l.Route)
+		_, runtime, err := l.podRuntime(ctx, d)
 		if err != nil {
 			return err
 		}
@@ -201,12 +209,16 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 	}
 	heartbeat := time.NewTicker(min(30*time.Second, max(ttl/3, time.Second)))
 	defer heartbeat.Stop()
+	heartbeatNamespaces := map[string]bool{l.Config.Namespace: true}
+	for _, state := range states {
+		heartbeatNamespaces[state.d.WorkloadNamespace(l.Config)] = true
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			for _, namespace := range l.Config.Namespaces {
+			for namespace := range heartbeatNamespaces {
 				if err := l.Kube.In(namespace).Heartbeat(ctx, l.Route, ttl); err != nil {
 					report("heartbeat: " + err.Error())
 				}
@@ -218,7 +230,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 				}
 				if time.Now().After(states[i].checkAt) {
 					states[i].checkAt = time.Now().Add(2 * time.Second)
-					_, runtime, err := l.Kube.In(states[i].d.WorkloadNamespace(l.Config)).PodRuntime(ctx, states[i].d, l.Route)
+					_, runtime, err := l.podRuntime(ctx, states[i].d)
 					if err != nil {
 						states[i].hash = ""
 						report(states[i].d.Name + ": " + err.Error())

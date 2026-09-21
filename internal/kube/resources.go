@@ -18,6 +18,7 @@ const (
 	dependencyManaged = "dev-cli-dependency"
 	taskManaged       = "dev-cli-task"
 	lockManaged       = "dev-cli-task-lock"
+	microTimeFormat   = "2006-01-02T15:04:05.000000Z07:00"
 )
 
 func readObjects(path, route, namespace string) ([]map[string]any, error) {
@@ -56,6 +57,10 @@ func prepareObjects(objects []map[string]any, namespace, managed, owner, route, 
 		}
 		if kind == "Secret" {
 			return fmt.Errorf("Secret bodies are not accepted; reference a pre-existing Secret")
+		}
+		switch kind {
+		case "Namespace", "Node", "PersistentVolume", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "StorageClass", "GatewayClass":
+			return fmt.Errorf("cluster-scoped kind %s is not accepted", kind)
 		}
 		metadata, _ := object["metadata"].(map[string]any)
 		if metadata == nil {
@@ -123,24 +128,83 @@ func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route
 		return err
 	}
 	for _, object := range objects {
+		metadata := object["metadata"].(map[string]any)
+		annotations, _ := metadata["annotations"].(map[string]any)
+		if annotations == nil {
+			annotations = map[string]any{}
+		}
+		annotations["dev-cli.io/retention"] = d.Retention
+		metadata["annotations"] = annotations
+		digest, _ := json.Marshal(object)
+		sum := sha256.Sum256(digest)
+		annotations["dev-cli.io/manifest-sha256"] = hex.EncodeToString(sum[:])
+	}
+	for _, object := range objects {
 		kind, name := objectIdentity(object)
-		if err := c.ensureManaged(ctx, kind, name, dependencyManaged, owner, route); err != nil {
+		payload, _ := json.Marshal(object)
+		dry, err := c.RunKubectl(ctx, []string{"apply", "--dry-run=server", "-f", "-", "-o", "json"}, bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("validate dependency %s object %s/%s: %w", d.Name, kind, name, err)
+		}
+		var validated struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(dry, &validated); err != nil || validated.Metadata.Namespace != d.Namespace {
+			return fmt.Errorf("dependency %s object %s/%s is not namespaced in %s", d.Name, kind, name, d.Namespace)
+		}
+		existing, err := c.RunKubectl(ctx, []string{"get", kind, name, "--ignore-not-found=true", "-o", "json"}, nil)
+		if err != nil {
 			return err
 		}
-	}
-	payload, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": objects})
-	if _, err := c.RunKubectl(ctx, []string{"apply", "-f", "-"}, bytes.NewReader(payload)); err != nil {
-		return err
+		if len(bytes.TrimSpace(existing)) > 0 {
+			if err := c.ensureManagedJSON(existing, kind, name, dependencyManaged, owner, route); err != nil {
+				return err
+			}
+			var current struct {
+				Metadata struct {
+					Annotations map[string]string `json:"annotations"`
+				} `json:"metadata"`
+			}
+			if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/manifest-sha256"] != object["metadata"].(map[string]any)["annotations"].(map[string]any)["dev-cli.io/manifest-sha256"] {
+				return fmt.Errorf("dependency %s object %s/%s differs from its immutable provisioned manifest", d.Name, kind, name)
+			}
+			continue
+		}
+		if _, err := c.RunKubectl(ctx, []string{"create", "-f", "-"}, bytes.NewReader(payload)); err != nil {
+			return fmt.Errorf("create dependency %s object %s/%s: %w", d.Name, kind, name, err)
+		}
 	}
 	for _, ready := range d.Readiness {
 		timeout := ready.Timeout
 		if timeout == "" {
 			timeout = "2m"
 		}
-		args := []string{"wait", ready.Resource + "/" + strings.ReplaceAll(ready.Name, "${DEV_ROUTE}", route), "--for=condition=" + ready.Condition, "--timeout=" + timeout}
+		waitFor := "condition=" + ready.Condition
+		if ready.JSONPath != "" {
+			waitFor = "jsonpath={" + ready.JSONPath + "}=" + ready.Value
+		}
+		args := []string{"wait", ready.Resource + "/" + strings.ReplaceAll(ready.Name, "${DEV_ROUTE}", route), "--for=" + waitFor, "--timeout=" + timeout}
 		if _, err := c.RunKubectl(ctx, args, nil); err != nil {
 			return fmt.Errorf("dependency %s readiness: %w", d.Name, err)
 		}
+	}
+	return nil
+}
+
+func (c Client) ensureManagedJSON(out []byte, kind, name, managed, owner, route string) error {
+	var object struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &object); err != nil {
+		return err
+	}
+	labels := object.Metadata.Labels
+	if labels[ManagedLabel] != managed || labels[OwnerLabel] != naming.Slug(owner, 40) || labels[RouteLabel] != route {
+		return fmt.Errorf("refusing to mutate %s/%s: ownership labels do not match", kind, name)
 	}
 	return nil
 }
@@ -159,10 +223,26 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 	}
 	for _, object := range objects {
 		kind, name := objectIdentity(object)
-		if err := c.ensureManaged(ctx, kind, name, dependencyManaged, owner, route); err != nil {
+		existing, err := c.RunKubectl(ctx, []string{"get", kind, name, "--ignore-not-found=true", "-o", "json"}, nil)
+		if err != nil {
 			return err
 		}
-		if _, err := c.RunKubectl(ctx, []string{"delete", kind, name, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
+		if len(bytes.TrimSpace(existing)) == 0 {
+			continue
+		}
+		if err := c.ensureManagedJSON(existing, kind, name, dependencyManaged, owner, route); err != nil {
+			return err
+		}
+		var current struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/retention"] != "down" {
+			return fmt.Errorf("refusing to delete retained dependency object %s/%s", kind, name)
+		}
+		selector := ManagedLabel + "=" + dependencyManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
+		if _, err := c.RunKubectl(ctx, []string{"delete", kind, "-l", selector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
 			return err
 		}
 	}
@@ -186,8 +266,8 @@ func lockName(target string) string {
 	return "dev-task-" + hex.EncodeToString(sum[:])[:16]
 }
 
-func (c Client) acquireTaskLock(ctx context.Context, task config.Task, holder string, timeout time.Duration) (func(), error) {
-	c = c.In(task.Namespace)
+func (c Client) acquireTaskLock(ctx context.Context, task config.Task, lockNamespace, holder string, timeout time.Duration) (func(), error) {
+	c = c.In(lockNamespace)
 	name, now, duration := lockName(task.Target), time.Now().UTC(), int(timeout.Seconds())+60
 	out, err := c.RunKubectl(ctx, []string{"get", "lease", name, "--ignore-not-found=true", "-o", "json"}, nil)
 	if err != nil {
@@ -201,11 +281,18 @@ func (c Client) acquireTaskLock(ctx context.Context, task config.Task, holder st
 		if current.Metadata.Labels[ManagedLabel] != lockManaged {
 			return nil, fmt.Errorf("refusing to adopt lease/%s", name)
 		}
-		if current.Spec.Holder != "" && now.Before(current.Spec.Renew.Add(time.Duration(current.Spec.Duration)*time.Second)) {
-			return nil, fmt.Errorf("task target %q is locked by %s", task.Target, current.Spec.Holder)
+		if current.Spec.Holder != "" {
+			exists, terminal, err := c.holderJobState(ctx, current.Spec.Holder)
+			if err != nil {
+				return nil, err
+			}
+			unexpired := now.Before(current.Spec.Renew.Add(time.Duration(current.Spec.Duration) * time.Second))
+			if exists && !terminal || !exists && unexpired {
+				return nil, fmt.Errorf("task target %q is locked by %s", task.Target, current.Spec.Holder)
+			}
 		}
 	}
-	object := map[string]any{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": map[string]any{"name": name, "namespace": task.Namespace, "labels": map[string]any{ManagedLabel: lockManaged}}, "spec": map[string]any{"holderIdentity": holder, "leaseDurationSeconds": duration, "renewTime": now.Format(time.RFC3339)}}
+	object := map[string]any{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": map[string]any{"name": name, "namespace": lockNamespace, "labels": map[string]any{ManagedLabel: lockManaged}}, "spec": map[string]any{"holderIdentity": holder, "leaseDurationSeconds": duration, "renewTime": now.Format(microTimeFormat)}}
 	verb := "create"
 	if current.Metadata.ResourceVersion != "" {
 		object["metadata"].(map[string]any)["resourceVersion"] = current.Metadata.ResourceVersion
@@ -228,20 +315,50 @@ func (c Client) acquireTaskLock(ctx context.Context, task config.Task, holder st
 		}
 		object["metadata"].(map[string]any)["resourceVersion"] = latest.Metadata.ResourceVersion
 		object["spec"].(map[string]any)["holderIdentity"] = ""
-		object["spec"].(map[string]any)["renewTime"] = time.Now().UTC().Format(time.RFC3339)
+		object["spec"].(map[string]any)["renewTime"] = time.Now().UTC().Format(microTimeFormat)
 		payload, _ := json.Marshal(object)
 		_, _ = c.RunKubectl(releaseCtx, []string{"replace", "-f", "-"}, bytes.NewReader(payload))
 	}, nil
 }
 
-func (c Client) RunTask(ctx context.Context, task config.Task, image, revision, owner, route string) error {
-	timeout, _ := time.ParseDuration(task.Timeout)
-	holder := route + "/" + task.Name
-	release, err := c.acquireTaskLock(ctx, task, holder, timeout)
-	if err != nil {
-		return err
+type jobStatus struct {
+	Status struct {
+		Conditions []struct{ Type, Status string } `json:"conditions"`
+	} `json:"status"`
+}
+
+func terminalJob(data []byte) (bool, error) {
+	var job jobStatus
+	if err := json.Unmarshal(data, &job); err != nil {
+		return false, err
 	}
-	defer release()
+	for _, condition := range job.Status.Conditions {
+		if condition.Status == "True" && (condition.Type == "Complete" || condition.Type == "Failed") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c Client) holderJobState(ctx context.Context, holder string) (bool, bool, error) {
+	parts := strings.Split(holder, "/")
+	if len(parts) != 3 {
+		return false, false, fmt.Errorf("cannot verify task lock holder %q", holder)
+	}
+	job := naming.Resource(parts[2], parts[1])
+	out, err := c.In(parts[0]).RunKubectl(ctx, []string{"get", "job", job, "--ignore-not-found=true", "-o", "json"}, nil)
+	if err != nil {
+		return false, false, err
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return false, false, nil
+	}
+	terminal, err := terminalJob(out)
+	return true, terminal, err
+}
+
+func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, image, revision, owner, route string) error {
+	timeout, _ := time.ParseDuration(task.Timeout)
 	c = c.In(task.Namespace)
 	objects, err := readObjects(task.Manifest, route, task.Namespace)
 	if err != nil {
@@ -265,8 +382,17 @@ func (c Client) RunTask(ctx context.Context, task config.Task, image, revision, 
 	metadata["annotations"] = annotations
 	if image != "" {
 		spec, _ := objects[0]["spec"].(map[string]any)
+		if spec == nil {
+			return fmt.Errorf("task %s Job has no spec", task.Name)
+		}
 		template, _ := spec["template"].(map[string]any)
+		if template == nil {
+			return fmt.Errorf("task %s Job has no pod template", task.Name)
+		}
 		podSpec, _ := template["spec"].(map[string]any)
+		if podSpec == nil {
+			return fmt.Errorf("task %s Job has no pod spec", task.Name)
+		}
 		containers, _ := podSpec["containers"].([]any)
 		found := false
 		for _, value := range containers {
@@ -286,30 +412,48 @@ func (c Client) RunTask(ctx context.Context, task config.Task, image, revision, 
 	if err := c.ensureManaged(ctx, "job", name, taskManaged, owner, route); err != nil {
 		return err
 	}
-	if _, err := c.RunKubectl(ctx, []string{"delete", "job", name, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
+	holder := task.Namespace + "/" + route + "/" + task.Name
+	release, err := c.acquireTaskLock(ctx, task, lockNamespace, holder, timeout)
+	if err != nil {
+		return err
+	}
+	started := false
+	defer func() {
+		if !started {
+			release()
+		}
+	}()
+	selector := ManagedLabel + "=" + taskManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + task.Name
+	if _, err := c.RunKubectl(ctx, []string{"delete", "jobs", "-l", selector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
 		return err
 	}
 	payload, _ := json.Marshal(objects[0])
 	if _, err := c.RunKubectl(ctx, []string{"create", "-f", "-"}, bytes.NewReader(payload)); err != nil {
 		return err
 	}
+	started = true
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		out, err := c.RunKubectl(ctx, []string{"get", "job", name, "-o", "json"}, nil)
 		if err != nil {
 			return err
 		}
-		var status struct {
-			Status struct{ Succeeded, Failed, Active int } `json:"status"`
-		}
+		var status jobStatus
 		if err := json.Unmarshal(out, &status); err != nil {
 			return err
 		}
-		if status.Status.Succeeded > 0 {
-			return nil
-		}
-		if status.Status.Failed > 0 {
-			return fmt.Errorf("task %s failed; inspect with kubectl --context %s -n %s logs job/%s", task.Name, c.Context, task.Namespace, name)
+		for _, condition := range status.Status.Conditions {
+			if condition.Status != "True" {
+				continue
+			}
+			if condition.Type == "Complete" {
+				release()
+				return nil
+			}
+			if condition.Type == "Failed" {
+				release()
+				return fmt.Errorf("task %s failed; inspect with kubectl --context %s -n %s logs job/%s", task.Name, c.Context, task.Namespace, name)
+			}
 		}
 		select {
 		case <-ctx.Done():

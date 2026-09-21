@@ -10,21 +10,23 @@ import (
 )
 
 type Config struct {
-	KubeContext      string       `json:"kubeContext"`
-	Namespace        string       `json:"namespace"`
-	Registry         string       `json:"registry"`
-	IngressHost      string       `json:"ingressHost"`
-	IngressClass     string       `json:"ingressClass"`
-	GatewayName      string       `json:"gatewayName"`
-	GatewayNamespace string       `json:"gatewayNamespace"`
-	CookieName       string       `json:"cookieName"`
-	TTL              string       `json:"ttl"`
-	MetadataQuery    string       `json:"metadataQuery"`
-	Namespaces       []string     `json:"namespaces"`
-	PublicHosts      []string     `json:"publicHosts"`
-	BazelArgs        []string     `json:"bazelArgs"`
-	Dependencies     []Dependency `json:"dependencies"`
-	Tasks            []Task       `json:"tasks"`
+	KubeContext       string       `json:"kubeContext"`
+	Namespace         string       `json:"namespace"`
+	Registry          string       `json:"registry"`
+	IngressHost       string       `json:"ingressHost"`
+	IngressClass      string       `json:"ingressClass"`
+	GatewayName       string       `json:"gatewayName"`
+	GatewayNamespace  string       `json:"gatewayNamespace"`
+	CookieName        string       `json:"cookieName"`
+	TTL               string       `json:"ttl"`
+	MetadataQuery     string       `json:"metadataQuery"`
+	Namespaces        []string     `json:"namespaces"`
+	PublicHosts       []string     `json:"publicHosts"`
+	BazelArgs         []string     `json:"bazelArgs"`
+	Dependencies      []Dependency `json:"dependencies"`
+	Tasks             []Task       `json:"tasks"`
+	TaskLockNamespace string       `json:"taskLockNamespace"`
+	InternalGateway   string       `json:"internalGateway"`
 }
 
 type ObjectRef struct {
@@ -46,6 +48,8 @@ type Readiness struct {
 	Name      string `json:"name"`
 	Condition string `json:"condition"`
 	Timeout   string `json:"timeout"`
+	JSONPath  string `json:"jsonPath"`
+	Value     string `json:"value"`
 }
 
 type Task struct {
@@ -83,6 +87,7 @@ type Deployable struct {
 	PublicHost        string    `json:"publicHost"`
 	ServicePort       int       `json:"servicePort"`
 	BaseService       ObjectRef `json:"baseService"`
+	PublicProxy       ObjectRef `json:"publicProxy"`
 	WorkloadTemplate  string    `json:"workloadTemplate"`
 	DevContainer      string    `json:"devContainer"`
 	SyncRoot          string    `json:"syncRoot"`
@@ -112,6 +117,9 @@ func Load(path string) (Config, error) {
 	if c.GatewayNamespace == "" {
 		c.GatewayNamespace = c.Namespace
 	}
+	if c.InternalGateway == "" {
+		c.InternalGateway = "http://dev-cli-gateway." + c.Namespace + ".svc.cluster.local"
+	}
 	if c.CookieName == "" {
 		c.CookieName = "dev_branch"
 	}
@@ -130,8 +138,20 @@ func Load(path string) (Config, error) {
 	if len(c.Namespaces) == 0 {
 		c.Namespaces = []string{c.Namespace}
 	}
+	if duplicate(c.Namespaces) != "" {
+		return Config{}, fmt.Errorf("duplicate namespace %q", duplicate(c.Namespaces))
+	}
+	if duplicate(c.PublicHosts) != "" {
+		return Config{}, fmt.Errorf("duplicate publicHost %q", duplicate(c.PublicHosts))
+	}
 	if !contains(c.Namespaces, c.Namespace) {
 		return Config{}, fmt.Errorf("namespaces must include routing namespace %q", c.Namespace)
+	}
+	if c.TaskLockNamespace == "" {
+		c.TaskLockNamespace = c.Namespace
+	}
+	if !contains(c.Namespaces, c.TaskLockNamespace) {
+		return Config{}, fmt.Errorf("taskLockNamespace %q is not allowed", c.TaskLockNamespace)
 	}
 	if c.IngressHost != "" && len(c.PublicHosts) == 0 {
 		c.PublicHosts = []string{c.IngressHost}
@@ -147,6 +167,26 @@ func Load(path string) (Config, error) {
 		if d.Retention != "retain" && d.Retention != "down" {
 			return Config{}, fmt.Errorf("dependency %q retention must be retain or down", d.Name)
 		}
+		for _, ready := range d.Readiness {
+			if ready.Resource == "" || ready.Name == "" || (ready.Condition == "") == (ready.JSONPath == "") {
+				return Config{}, fmt.Errorf("dependency %q readiness requires resource, name, and exactly one of condition or jsonPath", d.Name)
+			}
+			if ready.JSONPath != "" && ready.Value == "" {
+				return Config{}, fmt.Errorf("dependency %q jsonPath readiness requires value", d.Name)
+			}
+			if ready.Timeout != "" {
+				if _, err := time.ParseDuration(ready.Timeout); err != nil {
+					return Config{}, fmt.Errorf("dependency %q readiness timeout: %w", d.Name, err)
+				}
+			}
+		}
+	}
+	dependencyNames := make([]string, len(c.Dependencies))
+	for i, d := range c.Dependencies {
+		dependencyNames[i] = d.Name
+	}
+	if name := duplicate(dependencyNames); name != "" {
+		return Config{}, fmt.Errorf("duplicate dependency %q", name)
 	}
 	for i := range c.Tasks {
 		t := &c.Tasks[i]
@@ -156,8 +196,12 @@ func Load(path string) (Config, error) {
 		if t.Timeout == "" {
 			t.Timeout = "5m"
 		}
-		if _, err := time.ParseDuration(t.Timeout); err != nil {
+		timeout, err := time.ParseDuration(t.Timeout)
+		if err != nil {
 			return Config{}, fmt.Errorf("task %q timeout: %w", t.Name, err)
+		}
+		if timeout < time.Second {
+			return Config{}, fmt.Errorf("task %q timeout must be at least 1s", t.Name)
 		}
 		if (t.ImageName == "") != (t.PushTarget == "") {
 			return Config{}, fmt.Errorf("task %q imageName and pushTarget must be set together", t.Name)
@@ -166,7 +210,32 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("task %q container is required for a published image", t.Name)
 		}
 	}
+	taskNames := make([]string, len(c.Tasks))
+	for i, t := range c.Tasks {
+		taskNames[i] = t.Name
+	}
+	if name := duplicate(taskNames); name != "" {
+		return Config{}, fmt.Errorf("duplicate task %q", name)
+	}
+	for _, task := range c.Tasks {
+		for _, name := range task.Dependencies {
+			if _, ok := c.Dependency(name); !ok {
+				return Config{}, fmt.Errorf("task %q has unknown dependency %q", task.Name, name)
+			}
+		}
+	}
 	return c, nil
+}
+
+func duplicate(values []string) string {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if seen[value] {
+			return value
+		}
+		seen[value] = true
+	}
+	return ""
 }
 
 func contains(values []string, value string) bool {
@@ -227,6 +296,13 @@ func (d Deployable) Base(c Config) ObjectRef {
 	}
 	if r.Port == 0 {
 		r.Port = d.OverlayPort()
+	}
+	return r
+}
+func (d Deployable) Proxy(c Config) ObjectRef {
+	r := d.PublicProxy
+	if r.Name != "" && r.Namespace == "" {
+		r.Namespace = d.WorkloadNamespace(c)
 	}
 	return r
 }

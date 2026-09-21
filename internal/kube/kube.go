@@ -118,7 +118,7 @@ func mergeNamed(values []any, additions ...map[string]any) []any {
 	return values
 }
 
-func loadPodTemplate(path string) (map[string]any, error) {
+func loadPodTemplate(path, route, namespace string) (map[string]any, error) {
 	if path == "" {
 		return map[string]any{}, nil
 	}
@@ -126,6 +126,7 @@ func loadPodTemplate(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read workload template %s: %w", path, err)
 	}
+	b = []byte(strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(string(b)))
 	var template map[string]any
 	if err := json.Unmarshal(b, &template); err != nil {
 		return nil, fmt.Errorf("parse workload template %s: %w", path, err)
@@ -193,17 +194,21 @@ func annotations(owner, branch, revision, baseRef, baseRevision, image string, e
 
 func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, image, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
 	c = c.In(d.WorkloadNamespace(cfg))
+	if cfg.InternalGateway == "" {
+		cfg.InternalGateway = "http://dev-cli-gateway." + cfg.Namespace + ".svc.cluster.local"
+	}
 	name := naming.Resource(d.Name, route)
 	created := time.Now().UTC().Format(time.RFC3339)
 	if existing, err := c.RunKubectl(ctx, []string{"get", "deployment", name, "-o", "jsonpath={.metadata.annotations.dev-cli\\.io/created-at}"}, nil); err == nil && strings.TrimSpace(string(existing)) != "" {
 		created = strings.TrimSpace(string(existing))
 	}
 	ann, lbl := annotations(owner, branch, revision, baseRef, baseRevision, image, expiry, created), labels(owner, route, d.Name)
+	ann["dev-cli.io/dev-container"] = d.Container()
 	env := []any{
 		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
-		map[string]any{"name": "DEV_NAMESPACE", "value": cfg.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": "http://dev-cli-gateway"},
+		map[string]any{"name": "DEV_NAMESPACE", "value": c.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": cfg.InternalGateway},
 	}
-	template, err := loadPodTemplate(d.WorkloadTemplate)
+	template, err := loadPodTemplate(d.WorkloadTemplate, route, c.Namespace)
 	if err != nil {
 		return err
 	}
@@ -265,7 +270,10 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	}
 	env = existingEnv
 	existingMounts, _ := app["volumeMounts"].([]any)
-	mounts = append(existingMounts, mounts...)
+	for _, value := range mounts {
+		existingMounts = mergeNamed(existingMounts, value.(map[string]any))
+	}
+	mounts = existingMounts
 	app["image"], app["imagePullPolicy"], app["command"], app["env"], app["volumeMounts"], app["securityContext"] = image, "IfNotPresent", command, env, mounts, security
 	if _, ok := app["ports"]; !ok {
 		app["ports"] = []any{map[string]any{"name": "http", "containerPort": d.Port}}
@@ -281,7 +289,11 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	} else {
 		containers[containerIndex] = app
 	}
-	podSpec["containers"], podSpec["volumes"] = containers, append(anySlice(podSpec["volumes"]), volumes...)
+	existingVolumes := anySlice(podSpec["volumes"])
+	for _, value := range volumes {
+		existingVolumes = mergeNamed(existingVolumes, value.(map[string]any))
+	}
+	podSpec["containers"], podSpec["volumes"] = containers, existingVolumes
 	if _, ok := podSpec["securityContext"]; !ok {
 		podSpec["securityContext"] = map[string]any{"fsGroup": 65532}
 	}
@@ -302,7 +314,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 			"template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": podAnnotations}, "spec": podSpec},
 		},
 	}
-	svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": "http"}}}}
+	svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
 	items = append(items, deploy, svc)
 	for _, resource := range []string{"deployment", "service"} {
 		if err := c.ensureOwned(ctx, resource, name, owner, route); err != nil {
@@ -346,71 +358,76 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		if d.PublicPath == "" && d.InternalHost == "" {
 			continue
 		}
-		base := d.Base(cfg)
-		backendRefs := []any{map[string]any{"name": base.Name, "port": base.Port}}
-		if base.Namespace != c.Namespace {
-			name := naming.Resource("base-"+d.Name, route)
-			items = append(items, map[string]any{"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}, "spec": map[string]any{"endpoints": []any{map[string]any{"fqdn": map[string]any{"hostname": base.Name + "." + base.Namespace + ".svc.cluster.local", "port": base.Port}}}}})
-			backendRefs = []any{map[string]any{"group": "gateway.envoyproxy.io", "kind": "Backend", "name": name, "port": base.Port}}
+		baseRefs := c.serviceBackendRefs(cfg, d, d.Base(cfg), "base-", owner, branch, revision, baseRef, baseRevision, route, expiry, created, &items)
+		backendRefs := baseRefs
+		dataRouteName := naming.Resource("route-"+d.Name, route)
+		publicRouteName := dataRouteName
+		if d.InternalHost != "" && d.PublicPath != "" {
+			publicRouteName = naming.Resource("route-public-"+d.Name, route)
+		}
+		directRoutes := []string{}
+		if d.InternalHost != "" {
+			directRoutes = append(directRoutes, dataRouteName)
+		}
+		if d.PublicPath != "" && d.Proxy(cfg).Name == "" {
+			directRoutes = append(directRoutes, publicRouteName)
 		}
 		if affected[d.Name] {
-			failover, refs := c.failoverResources(cfg, d, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
+			failover, refs := c.failoverResources(cfg, d, directRoutes, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
 			items = append(items, failover...)
 			backendRefs = refs
 		}
-		matches, hostnames, filters := []any{}, []any{}, []any{}
+		if d.InternalHost != "" {
+			match := map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}}
+			rules := []any{map[string]any{"matches": []any{match}, "backendRefs": backendRefs}}
+			items = append(items, routeObject(cfg, d, dataRouteName, []any{d.InternalHost}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+		}
 		if d.PublicPath != "" {
-			hostnames = append(hostnames, d.Host(cfg))
-			matches = append(matches, map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + regexp.QuoteMeta(cfg.CookieName) + "=" + regexp.QuoteMeta(route) + "(;.*|$)"}}})
-			filters = append(filters, map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}})
+			publicRefs, publicBaseRefs := backendRefs, baseRefs
+			if proxy := d.Proxy(cfg); proxy.Name != "" {
+				publicRefs = c.serviceBackendRefs(cfg, d, proxy, "proxy-", owner, branch, revision, baseRef, baseRevision, route, expiry, created, &items)
+				publicBaseRefs = publicRefs
+			}
+			matches := []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + regexp.QuoteMeta(cfg.CookieName) + "=" + regexp.QuoteMeta(route) + "(;.*|$)"}}}}
+			filters := []any{map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}}}
 			// URLs are shared by all branches: never reuse another cookie's response.
 			filters = append(filters, map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}}}})
-		} else {
-			hostnames = append(hostnames, d.InternalHost)
-			matches = append(matches, map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}})
-		}
-		rules := []any{map[string]any{"matches": matches, "filters": filters, "backendRefs": backendRefs}}
-		if d.PublicPath != "" {
-			rules = append(rules, selectionRule(cfg, d, route, int(ttl.Seconds()), backendRefs))
+			rules := []any{map[string]any{"matches": matches, "filters": filters, "backendRefs": publicRefs}}
+			rules = append(rules, selectionRule(cfg, d, route, int(ttl.Seconds()), publicRefs))
 			// Each owner carries an identical base-selection rule. There is no
 			// shared mutable CLI resource and down/TTL remain owner-scoped.
-			rules = append(rules, selectionRule(cfg, d, deeplink.Base, 0, backendRefsForBase(c, cfg, d, owner, branch, revision, baseRef, baseRevision, route, expiry, created, &items)))
+			rules = append(rules, selectionRule(cfg, d, deeplink.Base, 0, publicBaseRefs))
+			items = append(items, routeObject(cfg, d, publicRouteName, []any{d.Host(cfg)}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
 		}
-		items = append(items, map[string]any{
-			"apiVersion": "gateway.networking.k8s.io/v1",
-			"kind":       "HTTPRoute",
-			"metadata": map[string]any{
-				"name": naming.Resource("route-"+d.Name, route), "labels": labels(owner, route, d.Name),
-				"annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created),
-			},
-			"spec": map[string]any{
-				"parentRefs": []any{map[string]any{"name": cfg.GatewayName, "namespace": cfg.GatewayNamespace}},
-				"hostnames":  hostnames,
-				"rules":      rules,
-			},
-		})
 	}
 	if len(items) == 0 {
 		return nil
 	}
 	for _, value := range items {
-		object := value.(map[string]any); kind, _ := object["kind"].(string); metadata := object["metadata"].(map[string]any); name, _ := metadata["name"].(string)
-		if err := c.ensureOwned(ctx, strings.ToLower(kind), name, owner, route); err != nil { return err }
+		object := value.(map[string]any)
+		kind, _ := object["kind"].(string)
+		metadata := object["metadata"].(map[string]any)
+		name, _ := metadata["name"].(string)
+		if err := c.ensureOwned(ctx, strings.ToLower(kind), name, owner, route); err != nil {
+			return err
+		}
 	}
 	payload, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
 	_, err := c.RunKubectl(ctx, []string{"apply", "-f", "-"}, bytes.NewReader(payload))
 	return err
 }
 
-func backendRefsForBase(c Client, cfg config.Config, d config.Deployable, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string, items *[]any) []any {
-	base := d.Base(cfg)
-	if base.Namespace == c.Namespace {
-		return []any{map[string]any{"name": base.Name, "port": base.Port}}
+func (c Client) serviceBackendRefs(cfg config.Config, d config.Deployable, ref config.ObjectRef, prefix, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string, items *[]any) []any {
+	if ref.Namespace == c.Namespace {
+		return []any{map[string]any{"name": ref.Name, "port": ref.Port}}
 	}
-	name := naming.Resource("base-"+d.Name, route)
-	// The ordinary rule already adds this Backend. Keep this helper pure with
-	// respect to duplicates when called from future route shapes.
-	return []any{map[string]any{"group": "gateway.envoyproxy.io", "kind": "Backend", "name": name, "port": base.Port}}
+	name := naming.Resource(prefix+d.Name, route)
+	*items = append(*items, map[string]any{"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "Backend", "metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}, "spec": map[string]any{"endpoints": []any{map[string]any{"fqdn": map[string]any{"hostname": ref.Name + "." + ref.Namespace + ".svc.cluster.local", "port": ref.Port}}}}})
+	return []any{map[string]any{"group": "gateway.envoyproxy.io", "kind": "Backend", "name": name, "port": ref.Port}}
+}
+
+func routeObject(cfg config.Config, d config.Deployable, name string, hostnames, rules []any, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string) map[string]any {
+	return map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}, "spec": map[string]any{"parentRefs": []any{map[string]any{"name": cfg.GatewayName, "namespace": cfg.GatewayNamespace}}, "hostnames": hostnames, "rules": rules}}
 }
 
 func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (string, error) {
@@ -419,30 +436,8 @@ func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (str
 }
 
 func (c Client) RunningPod(ctx context.Context, d config.Deployable, route string) (string, error) {
-	out, err := c.RunKubectl(ctx, []string{"get", "pods", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "-o", "json"}, nil)
-	if err != nil {
-		return "", err
-	}
-	var pods struct {
-		Items []struct {
-			Metadata struct {
-				Name              string     `json:"name"`
-				DeletionTimestamp *time.Time `json:"deletionTimestamp"`
-			} `json:"metadata"`
-			Status struct {
-				Phase string `json:"phase"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(out, &pods); err != nil {
-		return "", err
-	}
-	for _, pod := range pods.Items {
-		if pod.Metadata.DeletionTimestamp == nil && pod.Status.Phase == "Running" {
-			return pod.Metadata.Name, nil
-		}
-	}
-	return "", fmt.Errorf("no running pod for %s", d.Name)
+	name, _, err := c.podRuntime(ctx, d, route, false)
+	return name, err
 }
 
 func (c Client) WaitOverlay(ctx context.Context, d config.Deployable, route string) error {
@@ -452,6 +447,12 @@ func (c Client) WaitOverlay(ctx context.Context, d config.Deployable, route stri
 }
 
 func (c Client) PodRuntime(ctx context.Context, d config.Deployable, route string) (string, string, error) {
+	return c.podRuntime(ctx, d, route, true)
+}
+func (c Client) RunningPodRuntime(ctx context.Context, d config.Deployable, route string) (string, string, error) {
+	return c.podRuntime(ctx, d, route, false)
+}
+func (c Client) podRuntime(ctx context.Context, d config.Deployable, route string, requireReady bool) (string, string, error) {
 	out, err := c.RunKubectl(ctx, []string{"get", "pods", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "-o", "json"}, nil)
 	if err != nil {
 		return "", "", err
@@ -483,22 +484,32 @@ func (c Client) PodRuntime(ctx context.Context, d config.Deployable, route strin
 		if pod.Metadata.DeletionTimestamp != nil || pod.Status.Phase != "Running" {
 			continue
 		}
+		ready := false
 		for _, condition := range pod.Status.Conditions {
 			if condition.Type == "Ready" && condition.Status == "True" {
-				identity := pod.Metadata.UID
-				for _, container := range pod.Status.ContainerStatuses {
-					if container.Name == d.Container() {
-						identity += ":" + strconv.Itoa(container.RestartCount)
-					}
-				}
-				return pod.Metadata.Name, identity, nil
+				ready = true
 			}
+		}
+		if requireReady && !ready {
+			continue
+		}
+		{
+			identity := pod.Metadata.UID
+			for _, container := range pod.Status.ContainerStatuses {
+				if container.Name == d.Container() {
+					identity += ":" + strconv.Itoa(container.RestartCount)
+				}
+			}
+			return pod.Metadata.Name, identity, nil
 		}
 	}
 	if len(pods.Items) == 0 {
 		return "", "", fmt.Errorf("no pod for %s", d.Name)
 	}
-	return "", "", fmt.Errorf("no ready running pod for %s", d.Name)
+	if requireReady {
+		return "", "", fmt.Errorf("no ready running pod for %s", d.Name)
+	}
+	return "", "", fmt.Errorf("no running pod for %s", d.Name)
 }
 
 func (c Client) SyncFile(ctx context.Context, pod, container, local, remote string) error {
@@ -692,7 +703,9 @@ func (c Client) SyncBinary(ctx context.Context, pod, container, local, name, hea
 
 func (c Client) Down(ctx context.Context, owner, route string) error {
 	sel := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
-	if _, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil { return err }
+	if _, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
+		return err
+	}
 	taskSelector := ManagedLabel + "=" + taskManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
 	_, err := c.RunKubectl(ctx, []string{"delete", "jobs", "-l", taskSelector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil)
 	return err

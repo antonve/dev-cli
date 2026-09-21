@@ -3,15 +3,73 @@ package app
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/kube"
 	"github.com/antonve/dev-cli/internal/naming"
 )
+
+func TestInitializationRequiresExplicitDeclaredTasks(t *testing.T) {
+	ds := []config.Deployable{{Name: "api", StartupTasks: []string{"migrate", "seed"}}}
+	if err := validateInitialization(ds, nil, nil); err != nil {
+		t.Fatalf("ordinary shared startup should not initialize: %v", err)
+	}
+	if err := validateInitialization(ds, []string{"postgres"}, []string{"migrate"}); err == nil || !strings.Contains(err.Error(), "seed") {
+		t.Fatalf("missing task accepted: %v", err)
+	}
+	if err := validateInitialization(ds, []string{"postgres"}, []string{"migrate", "seed"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type logsRunner struct {
+	mu      sync.Mutex
+	streams []string
+}
+
+func (r *logsRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
+	joined := strings.Join(args, " ")
+	namespace := args[3]
+	if strings.Contains(joined, "get deployments") {
+		service, container := "api", "server"
+		if namespace == "web" {
+			service, container = "web", "next"
+		}
+		return []byte(`{"items":[{"metadata":{"labels":{"dev-cli.io/service":"` + service + `"},"annotations":{"dev-cli.io/dev-container":"` + container + `"}}}]}`), nil
+	}
+	return nil, nil
+}
+func (r *logsRunner) Stream(_ context.Context, _ string, args []string, _ io.Reader, _ io.Writer, _ io.Writer) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.streams = append(r.streams, strings.Join(args, " "))
+	return nil
+}
+
+func TestLogsSupportsAggregateAndServiceFilterWithoutBazel(t *testing.T) {
+	for _, service := range []string{"", "api"} {
+		r := &logsRunner{}
+		k := kube.Client{Run: r, Context: "dev", Namespace: "routes"}
+		cfg := config.Config{Namespaces: []string{"api", "web"}}
+		if err := logs(context.Background(), k, cfg, "route", service, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if service == "" && (len(r.streams) != 2 || !strings.Contains(strings.Join(r.streams, "\n"), "-c server") || !strings.Contains(strings.Join(r.streams, "\n"), "-c next")) {
+			t.Fatalf("aggregate logs: %v", r.streams)
+		}
+		if service == "api" && (len(r.streams) != 1 || !strings.Contains(r.streams[0], "--namespace api")) {
+			t.Fatalf("filtered logs: %v", r.streams)
+		}
+	}
+}
 
 func TestURLCommandNeedsOnlyGitAndConfig(t *testing.T) {
 	git, err := exec.LookPath("git")

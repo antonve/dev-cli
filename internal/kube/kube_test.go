@@ -221,12 +221,36 @@ func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
 	r := &captureRunner{}
 	c := Client{Run: r, Context: "dev", Namespace: "routes"}
 	cfg := config.Config{Namespace: "routes", IngressHost: "app.dev.lab", CookieName: "dev_branch", GatewayName: "dev", GatewayNamespace: "gateway"}
-	d := config.Deployable{Name: "api", Namespace: "feature-api", PublicHost: "account.dev.lab", PublicPath: "/", Port: 8000, ServicePort: 8080, ReadinessPath: "/ready", BaseService: config.ObjectRef{Name: "oathkeeper", Namespace: "auth", Port: 4455}}
+	d := config.Deployable{Name: "api", Namespace: "feature-api", PublicHost: "account.dev.lab", PublicPath: "/", InternalHost: "api.internal", Port: 8000, ServicePort: 8080, ReadinessPath: "/ready", BaseService: config.ObjectRef{Name: "api", Namespace: "base-api", Port: 80}, PublicProxy: config.ObjectRef{Name: "oathkeeper", Namespace: "auth", Port: 4455}}
 	if err := c.ApplyRoutes(context.Background(), cfg, []config.Deployable{d}, map[string]bool{"api": true}, "owner", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(r.payload), `"hostnames":["account.dev.lab"]`) || !strings.Contains(string(r.payload), `api-dev-route.feature-api.svc.cluster.local`) || !strings.Contains(string(r.payload), `oathkeeper.auth.svc.cluster.local`) {
 		t.Fatalf("wrong multi-namespace route: %s", r.payload)
+	}
+	var list struct {
+		Items []struct {
+			Kind string
+			Spec struct {
+				Hostnames []string
+				Rules     []struct{ BackendRefs []struct{ Name string } }
+			}
+		}
+	}
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		if item.Kind != "HTTPRoute" {
+			continue
+		}
+		got := item.Spec.Rules[0].BackendRefs[0].Name
+		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "account.dev.lab" && got != naming.Resource("proxy-api", "route") {
+			t.Fatalf("public route bypasses proxy: %s", got)
+		}
+		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "api.internal" && got != naming.Resource("active-api", "route") {
+			t.Fatalf("internal route misses overlay: %s", got)
+		}
 	}
 }
 

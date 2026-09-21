@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -153,18 +154,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "removed route %s local-loop-stopped=%t\n", route, stopped)
 		return nil
 	case "logs":
-		if service == "" {
-			return fmt.Errorf("usage: dev logs [flags] service")
-		}
-		ds, err := bz.AllMetadata(ctx, cfg.MetadataQuery)
-		if err != nil {
-			return err
-		}
-		d, ok := findDeployable(ds, service)
-		if !ok {
-			return fmt.Errorf("unknown service %q", service)
-		}
-		return k.In(d.WorkloadNamespace(cfg)).Logs(ctx, route, service, d.Container(), stdout, stderr)
+		return logs(ctx, k, cfg, route, service, stdout, stderr)
 	case "status":
 		_, _ = cleanup(ctx, k, cfg, time.Now())
 		return status(ctx, k, cfg, c.owner, branch, route, local.Running(), stdout)
@@ -247,6 +237,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "no affected deployables")
 			return nil
 		}
+		if err := validateInitialization(ds, selectedDependencies, selectedTasks); err != nil {
+			return err
+		}
 		rev, err := g.Revision(ctx)
 		if err != nil {
 			return err
@@ -319,6 +312,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
+		for _, host := range cfg.PublicHosts {
+			if host == cfg.IngressHost {
+				continue
+			}
+			link, _ := deeplink.URL(host, "/", route)
+			baseLink, _ := deeplink.URL(host, "/", deeplink.Base)
+			fmt.Fprintf(stdout, "Open environment (%s): %s\nOpen base (%s): %s\n", host, link, host, baseLink)
+		}
 		if noWatch {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
 			return nil
@@ -360,6 +361,17 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 		if d.PublicPath != "" && !cfg.AllowsHost(d.Host(cfg)) {
 			return fmt.Errorf("deployable %s publicHost %q is not allowed", d.Name, d.Host(cfg))
 		}
+		proxy := d.Proxy(cfg)
+		if proxy.Name != "" {
+			if d.PublicPath == "" || d.InternalHost == "" || proxy.Port < 1 || !cfg.AllowsNamespace(proxy.Namespace) {
+				return fmt.Errorf("deployable %s publicProxy requires publicPath, internalHost, positive port, and allowed namespace", d.Name)
+			}
+		}
+		for _, task := range d.StartupTasks {
+			if _, ok := cfg.Task(task); !ok {
+				return fmt.Errorf("deployable %s has unknown startupTask %q", d.Name, task)
+			}
+		}
 		if d.WorkloadTemplate != "" && !filepath.IsLocal(d.WorkloadTemplate) {
 			return fmt.Errorf("deployable %s workloadTemplate must be repository-relative", d.Name)
 		}
@@ -368,6 +380,24 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 		}
 		if d.SyncStripPrefix != "" && !filepath.IsLocal(d.SyncStripPrefix) {
 			return fmt.Errorf("deployable %s has unsafe syncStripPrefix", d.Name)
+		}
+	}
+	return nil
+}
+
+func validateInitialization(ds []config.Deployable, dependencies, tasks []string) error {
+	if len(dependencies) == 0 && len(tasks) == 0 {
+		return nil
+	}
+	requested := map[string]bool{}
+	for _, name := range tasks {
+		requested[name] = true
+	}
+	for _, d := range ds {
+		for _, name := range d.StartupTasks {
+			if !requested[name] {
+				return fmt.Errorf("service %s initialization requires explicit --task %s", d.Name, name)
+			}
 		}
 	}
 	return nil
@@ -383,6 +413,57 @@ func cleanup(ctx context.Context, k kube.Client, cfg config.Config, now time.Tim
 		total += n
 	}
 	return total, nil
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	io.Writer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.Writer.Write(p)
+}
+
+func logs(ctx context.Context, k kube.Client, cfg config.Config, route, service string, stdout, stderr io.Writer) error {
+	type ref struct{ namespace, service, container string }
+	var refs []ref
+	for _, namespace := range cfg.Namespaces {
+		list, err := k.In(namespace).List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.RouteLabel+"="+route)
+		if err != nil {
+			return err
+		}
+		for _, item := range list.Items {
+			name := item.Metadata.Labels[kube.ServiceLabel]
+			if service != "" && name != service {
+				continue
+			}
+			container := item.Metadata.Annotations["dev-cli.io/dev-container"]
+			if container == "" {
+				container = "app"
+			}
+			refs = append(refs, ref{namespace, name, container})
+		}
+	}
+	if len(refs) == 0 {
+		return fmt.Errorf("no owned overlay logs found for service %q", service)
+	}
+	logCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out, errOut := &lockedWriter{Writer: stdout}, &lockedWriter{Writer: stderr}
+	results := make(chan error, len(refs))
+	for _, item := range refs {
+		go func(item ref) {
+			results <- k.In(item.namespace).Logs(logCtx, route, item.service, item.container, out, errOut)
+		}(item)
+	}
+	for range refs {
+		if err := <-results; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runTask(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Config, name, revision, owner, route string, w io.Writer) error {
@@ -414,7 +495,7 @@ func runTask(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Conf
 		}
 		fmt.Fprintf(w, "resolved task %s to %s\n", name, image)
 	}
-	if err := k.RunTask(ctx, task, image, revision, owner, route); err != nil {
+	if err := k.RunTask(ctx, task, cfg.TaskLockNamespace, image, revision, owner, route); err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "completed task", name)
@@ -438,7 +519,7 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 	checks := []struct {
 		name, cmd string
 		args      []string
-	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", append([]string{"query"}, append(c.BazelArgs, c.MetadataQuery, "--output=label", "--noshow_progress")...)}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"ingress-class", "kubectl", []string{"--context", c.KubeContext, "get", "ingressclass", c.IngressClass}}, {"gateway-api", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.GatewayName, "--namespace", c.GatewayNamespace}}, {"route-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "httproutes.gateway.networking.k8s.io", "--namespace", c.Namespace}}, {"registry", "curl", []string{"-fsS", "-o", "/dev/null", "https://" + registryHost + "/v2/"}}}
+	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", []string{"query", c.MetadataQuery, "--output=label", "--noshow_progress"}}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"ingress-class", "kubectl", []string{"--context", c.KubeContext, "get", "ingressclass", c.IngressClass}}, {"gateway-api", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.GatewayName, "--namespace", c.GatewayNamespace}}, {"route-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "httproutes.gateway.networking.k8s.io", "--namespace", c.Namespace}}, {"registry", "curl", []string{"-fsS", "-o", "/dev/null", "https://" + registryHost + "/v2/"}}}
 	for _, x := range checks {
 		if _, err := r.Run(ctx, x.cmd, x.args, nil); err != nil {
 			return fmt.Errorf("doctor %s: %w", x.name, err)

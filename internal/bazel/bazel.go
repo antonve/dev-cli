@@ -32,7 +32,7 @@ func lines(b []byte) []string {
 	return out
 }
 func (b Bazel) query(ctx context.Context, expression string) ([]string, error) {
-	out, err := b.Run.Run(ctx, "bazel", b.args("query", expression, "--output=label", "--noshow_progress"), nil)
+	out, err := b.Run.Run(ctx, "bazel", []string{"query", expression, "--output=label", "--noshow_progress"}, nil)
 	if err != nil {
 		return nil, err
 	}
