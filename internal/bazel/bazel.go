@@ -13,7 +13,14 @@ import (
 	"github.com/antonve/dev-cli/internal/execx"
 )
 
-type Bazel struct{ Run execx.Runner }
+type Bazel struct {
+	Run  execx.Runner
+	Args []string
+}
+
+func (b Bazel) args(command string, args ...string) []string {
+	return append(append([]string{command}, b.Args...), args...)
+}
 
 func lines(b []byte) []string {
 	var out []string
@@ -84,12 +91,12 @@ func (b Bazel) metadataForTargets(ctx context.Context, selected []string) ([]con
 	if len(selected) == 0 {
 		return nil, nil
 	}
-	if _, err := b.Run.Run(ctx, "bazel", append([]string{"build", "--noshow_progress"}, selected...), nil); err != nil {
+	if _, err := b.Run.Run(ctx, "bazel", append(b.args("build", "--noshow_progress"), selected...), nil); err != nil {
 		return nil, err
 	}
 	var result []config.Deployable
 	for _, target := range selected {
-		out, err := b.Run.Run(ctx, "bazel", []string{"cquery", target, "--output=files", "--noshow_progress"}, nil)
+		out, err := b.Run.Run(ctx, "bazel", b.args("cquery", target, "--output=files", "--noshow_progress"), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +120,7 @@ func (b Bazel) metadataForTargets(ctx context.Context, selected []string) ([]con
 }
 
 func (b Bazel) PushImage(ctx context.Context, target, repository, tag string) error {
-	args := []string{"run", "--noshow_progress", target, "--", "--repository", repository, "--tag", tag}
+	args := b.args("run", "--noshow_progress", target, "--", "--repository", repository, "--tag", tag)
 	if _, err := b.Run.Run(ctx, "bazel", args, nil); err != nil {
 		return fmt.Errorf("push %s to %s:%s: %w", target, repository, tag, err)
 	}
@@ -135,13 +142,13 @@ func labelPath(label string) (string, bool) {
 	return parts[0] + "/" + parts[1], true
 }
 func (b Bazel) BuildOutput(ctx context.Context, target string) (string, error) {
-	if _, err := b.Run.Run(ctx, "bazel", []string{"build", target, "--noshow_progress"}, nil); err != nil {
+	if _, err := b.Run.Run(ctx, "bazel", b.args("build", target, "--noshow_progress"), nil); err != nil {
 		return "", err
 	}
 	// A binary reached through an OCI rule may remain in Bazel's query universe
 	// in both target and transitioned configurations. Only the target
 	// configuration is the executable produced by the direct build above.
-	out, err := b.Run.Run(ctx, "bazel", []string{"cquery", configuredTarget(target), "--output=files", "--noshow_progress"}, nil)
+	out, err := b.Run.Run(ctx, "bazel", b.args("cquery", configuredTarget(target), "--output=files", "--noshow_progress"), nil)
 	if err != nil {
 		return "", err
 	}

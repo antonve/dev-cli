@@ -74,6 +74,56 @@ func (r *captureRunner) Run(_ context.Context, name string, args []string, in io
 	return nil, nil
 }
 
+type ownershipRunner struct {
+	owned   bool
+	writes  []string
+	payload []byte
+}
+
+func (r *ownershipRunner) Run(_ context.Context, _ string, args []string, in io.Reader) ([]byte, error) {
+	if in != nil {
+		r.payload, _ = io.ReadAll(in)
+		r.writes = append(r.writes, args[4])
+	}
+	if args[4] != "get" || strings.Contains(strings.Join(args, " "), "jsonpath") {
+		return nil, nil
+	}
+	labels := map[string]string{ManagedLabel: "other"}
+	if r.owned {
+		labels = map[string]string{ManagedLabel: "dev-cli", OwnerLabel: "alice", RouteLabel: "route"}
+	}
+	kind, name := args[5], args[6]
+	object := map[string]any{"metadata": map[string]any{"name": name, "resourceVersion": "7", "labels": labels}}
+	if kind == "service" {
+		object["spec"] = map[string]any{"clusterIP": "10.0.0.1", "clusterIPs": []string{"10.0.0.1"}}
+	}
+	b, _ := json.Marshal(object)
+	return b, nil
+}
+func (*ownershipRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+
+func TestOverlayWritesUseOwnershipCAS(t *testing.T) {
+	d := config.Deployable{Name: "web", Kind: "frontend", Port: 3000, ReadinessPath: "/ready"}
+	cfg := config.Config{Namespace: "apps"}
+	for _, owned := range []bool{false, true} {
+		r := &ownershipRunner{owned: owned}
+		err := (Client{Run: r, Context: "dev", Namespace: "apps"}).ApplyOverlay(context.Background(), cfg, d, "image", "alice", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour))
+		if !owned && (err == nil || len(r.writes) != 0) {
+			t.Fatalf("unowned collision err=%v writes=%v", err, r.writes)
+		}
+		if owned {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(r.writes) != 1 || r.writes[0] != "replace" || !strings.Contains(string(r.payload), `"resourceVersion":"7"`) || !strings.Contains(string(r.payload), `"clusterIP":"10.0.0.1"`) {
+				t.Fatalf("non-CAS update writes=%v payload=%s", r.writes, r.payload)
+			}
+		}
+	}
+}
+
 func TestSyncDeletionIsLimitedToPreviousManifest(t *testing.T) {
 	removed, err := removedSyncPaths("src/old.ts\nsrc/keep.ts\n", []string{"src/keep.ts", "src/new.ts"})
 	if err != nil || !reflect.DeepEqual(removed, []string{"src/old.ts"}) {
@@ -113,7 +163,7 @@ func TestBinaryUploadIsPublishedOnlyAfterSuccessfulCopy(t *testing.T) {
 	for _, fail := range []bool{true, false} {
 		r := &uploadRunner{fail: fail}
 		c := Client{Run: r, Context: "dev", Namespace: "ns"}
-		err := c.SyncBinary(context.Background(), "pod", "/local/binary", "api", "http://localhost:8080/readyz")
+		err := c.SyncBinary(context.Background(), "pod", "app", "/local/binary", "api", "http://localhost:8080/readyz")
 		if (err != nil) != fail {
 			t.Fatalf("fail=%v: %v", fail, err)
 		}
@@ -158,6 +208,143 @@ func TestOverlayOwnershipAndIsolation(t *testing.T) {
 	containers := items[1].(map[string]any)["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
 	if len(containers) != 1 || containers[0].(map[string]any)["image"] != "registry/image@sha256:abc" {
 		t.Fatalf("containers %#v", containers)
+	}
+}
+
+func TestWorkloadTemplatePreservesRuntimeContractAndReplacesSelectors(t *testing.T) {
+	t.Chdir(t.TempDir())
+	template := `{"metadata":{"labels":{"app":"tadoku-api","tier":"base"},"annotations":{"mesh":"enabled"}},"spec":{"serviceAccountName":"tadoku-api","volumes":[{"name":"token","projected":{"sources":[{"serviceAccountToken":{"audience":"tadoku-api","path":"token"}}]}}],"containers":[{"name":"sidecar","image":"sidecar"},{"name":"server","image":"base","args":["--listen=:8000"],"workingDir":"/srv","env":[{"name":"DATABASE_PASSWORD","valueFrom":{"secretKeyRef":{"name":"postgres","key":"password"}}}],"ports":[{"name":"http","containerPort":8000}],"readinessProbe":{"httpGet":{"path":"/healthz","port":"http"}},"resources":{"limits":{"memory":"1Gi"}},"volumeMounts":[{"name":"token","mountPath":"/var/run/token"}]}]}}`
+	if err := os.WriteFile("pod.json", []byte(template), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &captureRunner{}
+	c := Client{Run: r, Context: "dev", Namespace: "tdk-api"}
+	d := config.Deployable{Name: "tadoku-api", Kind: "backend", Namespace: "tdk-api", WorkloadTemplate: "pod.json", DevContainer: "server", Port: 8000, ServicePort: 80, ReadinessPath: "/healthz", ContainerPath: "/app/api"}
+	if err := c.ApplyOverlay(context.Background(), config.Config{Namespace: "routes"}, d, "registry/api@sha256:abc", "alice", "feature", "head", "origin/main", "base", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var list map[string]any
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	items := list["items"].([]any)
+	deployment := items[1].(map[string]any)
+	pod := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	labels := pod["metadata"].(map[string]any)["labels"].(map[string]any)
+	if labels["app"] != nil || labels[RouteLabel] != "route" || labels[ServiceLabel] != "tadoku-api" {
+		t.Fatalf("unsafe labels: %#v", labels)
+	}
+	spec := pod["spec"].(map[string]any)
+	if spec["serviceAccountName"] != "tadoku-api" {
+		t.Fatalf("service account lost: %#v", spec)
+	}
+	containers := spec["containers"].([]any)
+	if len(containers) != 2 {
+		t.Fatalf("containers: %#v", containers)
+	}
+	server := containers[1].(map[string]any)
+	encoded, _ := json.Marshal(server)
+	for _, want := range []string{`"secretKeyRef":{"key":"password","name":"postgres"}`, `"args":["--listen=:8000"]`, `"workingDir":"/srv"`, `"memory":"1Gi"`, `"path":"/healthz"`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("lost %s in %s", want, encoded)
+		}
+	}
+	service := items[2].(map[string]any)
+	port := service["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["port"]
+	if port != float64(80) && port != 80 {
+		t.Fatalf("service port = %#v", port)
+	}
+}
+
+func TestWorkloadTemplateDefaultProbeUsesConfiguredNumericPort(t *testing.T) {
+	t.Chdir(t.TempDir())
+	template := `{"spec":{"containers":[{"name":"server","ports":[{"name":"api","containerPort":8000}]}]}}`
+	if err := os.WriteFile("pod.json", []byte(template), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &captureRunner{}
+	d := config.Deployable{Name: "api", Kind: "backend", WorkloadTemplate: "pod.json", DevContainer: "server", Port: 8000, ServicePort: 80, ReadinessPath: "/ready", ContainerPath: "/app/api"}
+	if err := (Client{Run: r, Context: "dev", Namespace: "apps"}).ApplyOverlay(context.Background(), config.Config{Namespace: "apps"}, d, "image", "alice", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []struct {
+			Kind string `json:"kind"`
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Name           string `json:"name"`
+							ReadinessProbe struct {
+								HTTPGet struct {
+									Port int `json:"port"`
+								} `json:"httpGet"`
+							} `json:"readinessProbe"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		if item.Kind == "Deployment" && len(item.Spec.Template.Spec.Containers) > 0 {
+			if got := item.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Port; got != 8000 {
+				t.Fatalf("default readiness port = %d", got)
+			}
+			return
+		}
+	}
+	t.Fatal("deployment not found")
+}
+
+func TestWorkloadTemplateRejectsInitContainers(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("pod.json", []byte(`{"spec":{"initContainers":[{"name":"migrate"}],"containers":[{"name":"app"}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := (Client{Run: &captureRunner{}, Namespace: "ns"}).ApplyOverlay(context.Background(), config.Config{Namespace: "ns"}, config.Deployable{Name: "api", Kind: "backend", Port: 8000, WorkloadTemplate: "pod.json"}, "image", "owner", "branch", "rev", "base", "base-rev", "route", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "initContainers") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
+	r := &captureRunner{}
+	c := Client{Run: r, Context: "dev", Namespace: "routes"}
+	cfg := config.Config{Namespace: "routes", IngressHost: "app.dev.lab", CookieName: "dev_branch", GatewayName: "dev", GatewayNamespace: "gateway"}
+	d := config.Deployable{Name: "api", Namespace: "feature-api", PublicHost: "account.dev.lab", PublicPath: "/", InternalHost: "api.internal", Port: 8000, ServicePort: 8080, ReadinessPath: "/ready", BaseService: config.ObjectRef{Name: "api", Namespace: "base-api", Port: 80}, PublicProxy: config.ObjectRef{Name: "oathkeeper", Namespace: "auth", Port: 4455}}
+	if err := c.ApplyRoutes(context.Background(), cfg, []config.Deployable{d}, map[string]bool{"api": true}, "owner", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(r.payload), `"hostnames":["account.dev.lab"]`) || !strings.Contains(string(r.payload), `api-dev-route.feature-api.svc.cluster.local`) || !strings.Contains(string(r.payload), `oathkeeper.auth.svc.cluster.local`) {
+		t.Fatalf("wrong multi-namespace route: %s", r.payload)
+	}
+	var list struct {
+		Items []struct {
+			Kind string
+			Spec struct {
+				Hostnames []string
+				Rules     []struct{ BackendRefs []struct{ Name string } }
+			}
+		}
+	}
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		if item.Kind != "HTTPRoute" {
+			continue
+		}
+		got := item.Spec.Rules[0].BackendRefs[0].Name
+		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "account.dev.lab" && got != naming.Resource("proxy-api", "route") {
+			t.Fatalf("public route bypasses proxy: %s", got)
+		}
+		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "api.internal" && got != naming.Resource("active-api", "route") {
+			t.Fatalf("internal route misses overlay: %s", got)
+		}
 	}
 }
 

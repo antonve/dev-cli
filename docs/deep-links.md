@@ -3,6 +3,7 @@
 ```sh
 dev up --owner alice
 dev url --owner alice '/settings?tab=profile#details'
+dev url --owner alice --host account.dev.lab '/settings'
 dev url --owner alice --clear '/settings?tab=profile#details'
 ```
 
@@ -16,6 +17,12 @@ For example, `https://app.dev.lab/settings?dev-branch=alice-feature-hash&tab=pro
 selects the environment on the first request, sets its cookie, and keeps subsequent
 requests on that environment. This uses native Envoy Gateway HTTPRoute filters:
 no frontend handler, JavaScript injection, extra router service or new dependency.
+
+`publicHosts` is an explicit allowlist for `--host`. Selection cookies remain
+host-only, so selecting the main application does not silently select account,
+admin, or flags hosts. Generate/open a link for each desired host. `dev status`
+returns `urls` and `baseURLs` maps in addition to the backward-compatible
+primary `url` and `baseURL`.
 
 ## First-request precedence
 
@@ -63,6 +70,9 @@ already-owned HTTPRoutes.
   are required for independent simultaneous selections on one hostname.
 - Internal backend calls still propagate normalized branch context through the
   gateway; frontend-free selection does not make backend propagation automatic.
+- Protected APIs declare a `publicProxy` and separate `internalHost`. Envoy
+  normalizes the browser header before the authentication proxy; the proxy and
+  application must forward that normalized context to the internal host.
 - Route admission and health/DNS convergence are distinct. Transient failover
   errors remain possible. Validate response identities, not only resource health.
 

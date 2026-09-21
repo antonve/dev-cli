@@ -21,7 +21,12 @@ use Bazel.
 dev doctor
 dev up                         # compare with merge-base(origin/main, HEAD)
 dev up --base origin/other     # explicit comparison base
+dev up --service unchanged-api # explicitly add an unchanged deployable
+dev up --dependency branch-db --task migrate
+dev provision branch-db       # explicit, on-demand dependency
+dev task migrate              # serialized repository-owned Job
 dev url '/settings?tab=profile' # clickable branch link; no cluster mutation
+dev url --host account.dev.lab '/settings'
 dev url --clear '/settings'     # select base and clear the branch cookie
 dev status
 dev logs [service]
@@ -29,12 +34,15 @@ dev down
 dev cleanup                    # remove expired dev-cli overlays
 ```
 
-`dev up` stays in the foreground and supervises live updates. Stop it with
+`--service`, `--dependency`, and `--task` are explicit and repeatable; the CLI
+never infers related services or provisions dependencies automatically. `dev up`
+stays in the foreground and supervises live updates. Stop it with
 Ctrl-C; the Kubernetes resources remain until `dev down` or TTL cleanup. It is
 safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
 identity. `dev up` prints clickable environment and base links; `dev status`
 includes both URLs. Envoy selects the branch and sets the browser cookie from
 the `dev-branch` query parameter, with no frontend integration or manual menu.
+Each configured public host has an independent host-only selection cookie.
 Existing paths, query parameters and fragments are preserved. See
 [deep links](docs/deep-links.md) for selection precedence and limits.
 

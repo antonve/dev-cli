@@ -17,3 +17,23 @@
   to remove the route. Abandoned resources expire according to repository TTL.
 - The branch menu takes the `route` shown by `dev up` or `dev status`, not a raw
   branch name, preventing collisions between owners using identical branches.
+- Dependency reprovisioning is intentionally immutable. A manifest-hash error
+  means the route needs a new dependency name/route; the CLI will not apply over
+  a live database. `retain` objects survive config edits, down, and TTL.
+- A timed-out or interrupted task leaves its Lease held. A later invocation
+  recovers automatically only when the exact named Job has a terminal
+  Complete/Failed condition. Lease expiry and Job absence are deliberately not
+  proof: the old client may still create the Job after a pause.
+- Recover an abandoned absent-Job holder manually only after proving the
+  original `dev task`/`dev up` process has stopped and
+  `kubectl -n <namespace> get job <job>` reports the exact holder Job as
+  NotFound. Then clear that exact unchanged `<namespace>/<job>` holder with a
+  compare-and-set patch; never delete the Lease or clear a changed holder:
+
+  ```sh
+  kubectl --context <context> -n <lock-namespace> patch lease <lease> \
+    --type=json \
+    -p '[{"op":"test","path":"/spec/holderIdentity","value":"<namespace>/<job>"},{"op":"replace","path":"/spec/holderIdentity","value":""}]'
+  ```
+- For operator resources without standard conditions, use `jsonPath` and
+  `value` readiness (for example PostgresClusterStatus = Running).
