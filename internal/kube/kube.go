@@ -415,7 +415,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		}
 		if d.InternalHost != "" {
 			match := map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}}
-			rules := []any{map[string]any{"matches": []any{match}, "backendRefs": backendRefs}}
+			rules := []any{map[string]any{"matches": []any{match}, "backendRefs": backendRefs, "filters": routeHeaderFilters(route, false, false)}}
 			items = append(items, routeObject(cfg, d, dataRouteName, []any{d.InternalHost}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
 		}
 		if d.PublicPath != "" {
@@ -425,9 +425,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 				publicBaseRefs = publicRefs
 			}
 			matches := []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + regexp.QuoteMeta(cfg.CookieName) + "=" + regexp.QuoteMeta(route) + "(;.*|$)"}}}}
-			filters := []any{map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": route}}}}}
-			// URLs are shared by all branches: never reuse another cookie's response.
-			filters = append(filters, map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}}}})
+			filters := routeHeaderFilters(route, true, d.Proxy(cfg).Name != "")
 			rules := []any{map[string]any{"matches": matches, "filters": filters, "backendRefs": publicRefs}}
 			rules = append(rules, selectionRule(cfg, d, route, int(ttl.Seconds()), publicRefs))
 			// Each owner carries an identical base-selection rule. There is no

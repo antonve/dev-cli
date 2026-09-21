@@ -46,6 +46,12 @@ Each configured public host has an independent host-only selection cookie.
 Existing paths, query parameters and fragments are preserved. See
 [deep links](docs/deep-links.md) for selection precedence and limits.
 
+CLI-routed responses report `X-Dev-Selected` and Envoy's actual upstream in
+`X-Dev-Backend`, so an overlay selection can be distinguished from base fallback.
+Authentication proxy hops use a separate `X-Dev-Proxy-Backend` header. See
+[response provenance](docs/architecture.md#response-provenance) for error,
+internal-hop and uninstrumented-base limitations.
+
 Affected application images are built on demand, pushed through repository
 Bazel targets to the registry configured in `.dev/config.json`, resolved to an
 immutable digest, and injected into the overlay. The CLI injects its own backend
