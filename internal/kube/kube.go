@@ -26,7 +26,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	cliVersion     = "v0.3.0"
+	cliVersion     = "v0.4.0-dev"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
 )
 
@@ -160,14 +160,61 @@ func readRepoFile(path string) ([]byte, error) {
 	return os.ReadFile(resolved)
 }
 
-func (c Client) ensureOwned(ctx context.Context, resource, name, owner, route string) error {
-	out, err := c.RunKubectl(ctx, []string{"get", resource, name, "--ignore-not-found=true", "-o", "json"}, nil)
-	if err != nil {
-		return err
+func (c Client) writeOwnedObjects(ctx context.Context, items []any, owner, route string) error {
+	creates, updates := []any{}, []any{}
+	for _, value := range items {
+		object := value.(map[string]any)
+		kind := strings.ToLower(object["kind"].(string))
+		metadata := object["metadata"].(map[string]any)
+		name := metadata["name"].(string)
+		out, err := c.RunKubectl(ctx, []string{"get", kind, name, "--ignore-not-found=true", "-o", "json"}, nil)
+		if err != nil {
+			return err
+		}
+		if len(bytes.TrimSpace(out)) == 0 {
+			creates = append(creates, object)
+			continue
+		}
+		if err := c.ensureOwnedJSON(out, kind, name, owner, route); err != nil {
+			return err
+		}
+		var current map[string]any
+		if err := json.Unmarshal(out, &current); err != nil {
+			return err
+		}
+		currentMetadata, _ := current["metadata"].(map[string]any)
+		resourceVersion, _ := currentMetadata["resourceVersion"].(string)
+		if resourceVersion == "" {
+			return fmt.Errorf("existing %s/%s has no resourceVersion", kind, name)
+		}
+		metadata["resourceVersion"] = resourceVersion
+		if kind == "service" {
+			currentSpec, _ := current["spec"].(map[string]any)
+			desiredSpec, _ := object["spec"].(map[string]any)
+			for _, field := range []string{"clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy", "healthCheckNodePort"} {
+				if value, ok := currentSpec[field]; ok {
+					desiredSpec[field] = value
+				}
+			}
+		}
+		updates = append(updates, object)
 	}
-	if len(bytes.TrimSpace(out)) == 0 {
-		return nil
+	for _, write := range []struct {
+		verb  string
+		items []any
+	}{{"create", creates}, {"replace", updates}} {
+		if len(write.items) == 0 {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": write.items})
+		if _, err := c.RunKubectl(ctx, []string{write.verb, "-f", "-"}, bytes.NewReader(payload)); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (c Client) ensureOwnedJSON(out []byte, resource, name, owner, route string) error {
 	var object struct {
 		Metadata struct {
 			Labels map[string]string `json:"labels"`
@@ -279,7 +326,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		app["ports"] = []any{map[string]any{"name": "http", "containerPort": d.Port}}
 	}
 	if _, ok := app["readinessProbe"]; !ok {
-		app["readinessProbe"] = map[string]any{"httpGet": map[string]any{"path": d.ReadinessPath, "port": "http"}, "periodSeconds": 1, "failureThreshold": 15}
+		app["readinessProbe"] = map[string]any{"httpGet": map[string]any{"path": d.ReadinessPath, "port": d.Port}, "periodSeconds": 1, "failureThreshold": 15}
 	}
 	if _, ok := app["resources"]; !ok {
 		app["resources"] = map[string]any{"requests": map[string]any{"cpu": "10m", "memory": "32Mi"}, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}}
@@ -316,18 +363,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	}
 	svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
 	items = append(items, deploy, svc)
-	for _, resource := range []string{"deployment", "service"} {
-		if err := c.ensureOwned(ctx, resource, name, owner, route); err != nil {
-			return err
-		}
-	}
-	if d.Kind != "frontend" {
-		if err := c.ensureOwned(ctx, "configmap", name+"-runtime", owner, route); err != nil {
-			return err
-		}
-	}
-	payload, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
-	if _, err := c.RunKubectl(ctx, []string{"apply", "-f", "-"}, bytes.NewReader(payload)); err != nil {
+	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
 		return err
 	}
 	if d.Kind == "frontend" {
@@ -403,18 +439,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 	if len(items) == 0 {
 		return nil
 	}
-	for _, value := range items {
-		object := value.(map[string]any)
-		kind, _ := object["kind"].(string)
-		metadata := object["metadata"].(map[string]any)
-		name, _ := metadata["name"].(string)
-		if err := c.ensureOwned(ctx, strings.ToLower(kind), name, owner, route); err != nil {
-			return err
-		}
-	}
-	payload, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
-	_, err := c.RunKubectl(ctx, []string{"apply", "-f", "-"}, bytes.NewReader(payload))
-	return err
+	return c.writeOwnedObjects(ctx, items, owner, route)
 }
 
 func (c Client) serviceBackendRefs(cfg config.Config, d config.Deployable, ref config.ObjectRef, prefix, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string, items *[]any) []any {

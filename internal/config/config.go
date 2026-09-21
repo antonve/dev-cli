@@ -93,7 +93,6 @@ type Deployable struct {
 	SyncRoot          string    `json:"syncRoot"`
 	SyncStripPrefix   string    `json:"syncStripPrefix"`
 	SyncExcludes      []string  `json:"syncExcludes"`
-	StartupTasks      []string  `json:"startupTasks"`
 }
 
 func Load(path string) (Config, error) {

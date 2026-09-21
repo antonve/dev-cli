@@ -17,19 +17,6 @@ import (
 	"github.com/antonve/dev-cli/internal/naming"
 )
 
-func TestInitializationRequiresExplicitDeclaredTasks(t *testing.T) {
-	ds := []config.Deployable{{Name: "api", StartupTasks: []string{"migrate", "seed"}}}
-	if err := validateInitialization(ds, nil, nil); err != nil {
-		t.Fatalf("ordinary shared startup should not initialize: %v", err)
-	}
-	if err := validateInitialization(ds, []string{"postgres"}, []string{"migrate"}); err == nil || !strings.Contains(err.Error(), "seed") {
-		t.Fatalf("missing task accepted: %v", err)
-	}
-	if err := validateInitialization(ds, []string{"postgres"}, []string{"migrate", "seed"}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 type logsRunner struct {
 	mu      sync.Mutex
 	streams []string

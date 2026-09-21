@@ -237,9 +237,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "no affected deployables")
 			return nil
 		}
-		if err := validateInitialization(ds, selectedDependencies, selectedTasks); err != nil {
-			return err
-		}
 		rev, err := g.Revision(ctx)
 		if err != nil {
 			return err
@@ -367,11 +364,6 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 				return fmt.Errorf("deployable %s publicProxy requires publicPath, internalHost, positive port, and allowed namespace", d.Name)
 			}
 		}
-		for _, task := range d.StartupTasks {
-			if _, ok := cfg.Task(task); !ok {
-				return fmt.Errorf("deployable %s has unknown startupTask %q", d.Name, task)
-			}
-		}
 		if d.WorkloadTemplate != "" && !filepath.IsLocal(d.WorkloadTemplate) {
 			return fmt.Errorf("deployable %s workloadTemplate must be repository-relative", d.Name)
 		}
@@ -380,24 +372,6 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 		}
 		if d.SyncStripPrefix != "" && !filepath.IsLocal(d.SyncStripPrefix) {
 			return fmt.Errorf("deployable %s has unsafe syncStripPrefix", d.Name)
-		}
-	}
-	return nil
-}
-
-func validateInitialization(ds []config.Deployable, dependencies, tasks []string) error {
-	if len(dependencies) == 0 && len(tasks) == 0 {
-		return nil
-	}
-	requested := map[string]bool{}
-	for _, name := range tasks {
-		requested[name] = true
-	}
-	for _, d := range ds {
-		for _, name := range d.StartupTasks {
-			if !requested[name] {
-				return fmt.Errorf("service %s initialization requires explicit --task %s", d.Name, name)
-			}
 		}
 	}
 	return nil

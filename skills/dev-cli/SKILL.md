@@ -39,8 +39,8 @@ expansion or infer related services.
 Provision only explicitly requested dependencies with `dev provision <name>` or
 `dev up --dependency <name>`. `retain` dependencies deliberately survive down
 and TTL. Run repository-defined migrations/seeds with `dev task <name>` or `dev
-up --task <name>`; an initialization up must name every declared `startupTask`.
-A failed/timed-out task blocks overlay startup and never triggers reset. Never
+up --task <name>` in the required order. A failed/timed-out task blocks that up
+invocation and never triggers reset. Never
 delete a task Lease to bypass serialization; use the normal retry only after the
 prior Job is absent or terminal.
 

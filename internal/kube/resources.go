@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -244,11 +245,80 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 		if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/retention"] != "down" || current.Metadata.UID == "" {
 			return fmt.Errorf("refusing to delete retained dependency object %s/%s", kind, name)
 		}
-		if _, err := c.RunKubectl(ctx, []string{"delete", kind, name, "--preconditions=uid=" + current.Metadata.UID, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
+		path, err := c.namespacedResourcePath(ctx, object, name)
+		if err != nil {
 			return err
+		}
+		options, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Foreground", "preconditions": map[string]any{"uid": current.Metadata.UID}})
+		if _, err := c.RunKubectl(ctx, []string{"delete", "--raw", path, "-f", "-"}, bytes.NewReader(options)); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		deleted := false
+		for time.Now().Before(deadline) {
+			out, err := c.RunKubectl(ctx, []string{"get", kind, name, "--ignore-not-found=true", "-o", "json"}, nil)
+			if err != nil {
+				return err
+			}
+			if len(bytes.TrimSpace(out)) == 0 {
+				deleted = true
+				break
+			}
+			var live struct {
+				Metadata struct {
+					UID string `json:"uid"`
+				} `json:"metadata"`
+			}
+			if json.Unmarshal(out, &live) == nil && live.Metadata.UID != current.Metadata.UID {
+				deleted = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+		if !deleted {
+			return fmt.Errorf("timed out waiting for dependency object %s/%s uid %s to be deleted", kind, name, current.Metadata.UID)
 		}
 	}
 	return nil
+}
+
+func (c Client) namespacedResourcePath(ctx context.Context, object map[string]any, name string) (string, error) {
+	apiVersion, _ := object["apiVersion"].(string)
+	kind, _ := object["kind"].(string)
+	group := ""
+	if parts := strings.SplitN(apiVersion, "/", 2); len(parts) == 2 {
+		group = parts[0]
+	}
+	out, err := c.RunKubectl(ctx, []string{"api-resources", "--namespaced=true", "--api-group=" + group, "-o", "wide", "--no-headers"}, nil)
+	if err != nil {
+		return "", err
+	}
+	resource := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		for i := 1; i+2 < len(fields); i++ {
+			if fields[i] == apiVersion && fields[i+1] == "true" && strings.EqualFold(fields[i+2], kind) {
+				resource = fields[0]
+				break
+			}
+		}
+		if resource != "" {
+			break
+		}
+	}
+	if resource == "" {
+		return "", fmt.Errorf("cannot resolve namespaced API resource for %s %s", apiVersion, kind)
+	}
+	prefix := "/api/" + url.PathEscape(apiVersion)
+	if group != "" {
+		parts := strings.SplitN(apiVersion, "/", 2)
+		prefix = "/apis/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
+	}
+	return prefix + "/namespaces/" + url.PathEscape(c.Namespace) + "/" + url.PathEscape(resource) + "/" + url.PathEscape(name), nil
 }
 
 type lease struct {
@@ -425,10 +495,12 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 		}
 	}()
 	payload, _ := json.Marshal(objects[0])
+	// The API may create the Job even when kubectl loses the response. From this
+	// point onward only terminal Job proof may release the target lock.
+	started = true
 	if _, err := c.RunKubectl(ctx, []string{"create", "-f", "-"}, bytes.NewReader(payload)); err != nil {
 		return err
 	}
-	started = true
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		out, err := c.RunKubectl(ctx, []string{"get", "job", name, "-o", "json"}, nil)

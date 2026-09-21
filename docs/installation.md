@@ -49,7 +49,6 @@ inputs it represents. The emitted JSON declares:
 | Workload | optional `workloadTemplate`, `devContainer`, `baseService` |
 | Frontend development | `devCommand`, `sourceRoots`, `syncPaths`, `dependencyPaths`, `dependencyCommand`, optional `syncRoot`, `syncStripPrefix`, `syncExcludes` |
 | HTTP routing | `publicPath`/`publicHost`, `internalHost`, optional authenticated `publicProxy` |
-| Initialization | optional `startupTasks` |
 
 Image/push targets are registry-neutral. The push target accepts `--repository`
 and `--tag`; the CLI resolves the resulting digest before creating a workload.
@@ -103,6 +102,9 @@ it is the cross-owner serialization key. A task may also supply `imageName`,
 registry-neutral `pushTarget`, and `container` to publish the current checkout
 and inject its digest. Otherwise the Job manifest must deliberately pin the
 task image; its provenance is independent of the checkout annotation.
+Tasks run only when explicitly named. Repeat `--task` in the required order on
+`dev up`; any failure blocks that invocation before overlays are published or
+created. Ordinary startup never auto-seeds.
 
 Both manifest types support only `${DEV_ROUTE}` and `${DEV_NAMESPACE}` string
 substitution. They are not shell templates. Dependency resources are immutable

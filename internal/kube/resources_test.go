@@ -14,11 +14,14 @@ import (
 )
 
 type resourceRunner struct {
-	objects   map[string][]byte
-	deletes   []string
-	calls     []string
-	failJob   bool
-	activeJob bool
+	objects    map[string][]byte
+	deletes    []string
+	calls      []string
+	failJob    bool
+	activeJob  bool
+	lostCreate bool
+	rawPath    string
+	rawBody    []byte
 }
 
 func (r *resourceRunner) key(args []string, kind, name string) string {
@@ -27,6 +30,21 @@ func (r *resourceRunner) key(args []string, kind, name string) string {
 func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.Reader) ([]byte, error) {
 	verb := args[4]
 	r.calls = append(r.calls, strings.Join(args, " "))
+	if verb == "api-resources" {
+		if strings.Contains(strings.Join(args, " "), "acid.zalan.do") {
+			return []byte("postgresqls acid.zalan.do/v1 true postgresql [get delete]\n"), nil
+		}
+		return []byte("configmaps cm v1 true ConfigMap [get delete]\n"), nil
+	}
+	if verb == "delete" && args[5] == "--raw" {
+		r.rawPath = args[6]
+		r.rawBody, _ = io.ReadAll(in)
+		parts := strings.Split(args[6], "/")
+		namespace, resource, name := parts[len(parts)-3], parts[len(parts)-2], parts[len(parts)-1]
+		kind := strings.TrimSuffix(resource, "s")
+		delete(r.objects, namespace+"/"+kind+"/"+name)
+		return nil, nil
+	}
 	if strings.Contains(strings.Join(args, " "), "--dry-run=server") {
 		b, _ := io.ReadAll(in)
 		return b, nil
@@ -78,6 +96,9 @@ func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.R
 			}
 		}
 		r.objects[key], _ = json.Marshal(item)
+		if kind == "Job" && r.lostCreate {
+			return nil, errors.New("lost create response")
+		}
 	}
 	return nil, nil
 }
@@ -158,6 +179,18 @@ func TestChangedManifestCannotDeleteOlderRetainedObject(t *testing.T) {
 	}
 	if r.objects["apps/configmap/disposable-route-a"] != nil {
 		t.Fatal("disposable object was not deleted")
+	}
+	if r.rawPath != "/api/v1/namespaces/apps/configmaps/disposable-route-a" {
+		t.Fatalf("raw delete path = %q", r.rawPath)
+	}
+	var options struct {
+		Kind          string `json:"kind"`
+		Preconditions struct {
+			UID string `json:"uid"`
+		} `json:"preconditions"`
+	}
+	if err := json.Unmarshal(r.rawBody, &options); err != nil || options.Kind != "DeleteOptions" || options.Preconditions.UID != "disposable-route-a-uid" {
+		t.Fatalf("delete options = %#v err=%v body=%s", options, err, r.rawBody)
 	}
 }
 
@@ -249,6 +282,26 @@ func TestTaskTimeoutRetainsLockWhileJobMayRun(t *testing.T) {
 	}
 	if held.Spec.Holder == "" {
 		t.Fatal("active task lock was released")
+	}
+}
+
+func TestAmbiguousTaskCreateRetainsLock(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := osWrite("job.json", `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"ignored"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"migrate","image":"migration"}]}}}}`); err != nil {
+		t.Fatal(err)
+	}
+	r := &resourceRunner{objects: map[string][]byte{}, lostCreate: true}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Manifest: "job.json", Target: "postgres.apps", Timeout: "1m"}
+	if err := c.RunTask(context.Background(), task, "locks", "", "rev", "alice", "route-a"); err == nil || !strings.Contains(err.Error(), "lost create response") {
+		t.Fatalf("task error = %v", err)
+	}
+	var held lease
+	if err := json.Unmarshal(r.objects["locks/lease/"+lockName(task.Target)], &held); err != nil {
+		t.Fatal(err)
+	}
+	if held.Spec.Holder == "" {
+		t.Fatal("ambiguous task create released the target lock")
 	}
 }
 

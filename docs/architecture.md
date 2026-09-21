@@ -108,9 +108,9 @@ overlay lifecycle controller.
 `.dev/config.json` may declare environment-owned dependency manifests and named
 task Jobs as repository-relative JSON. `dev provision` and `dev task` are
 explicit operations; `dev up --dependency ... --task ...` runs provision →
-readiness → task before applying an overlay. When initialization is requested,
-a deployable's `startupTasks` must all be explicitly supplied. Ordinary
-shared-base `dev up` does not run them.
+readiness → tasks in flag order before applying an overlay. A failed task aborts
+that up invocation before workload publication or creation. Ordinary `dev up`
+does not infer or rerun migrations/seeds.
 
 Dependency objects must be namespaced in an allowed namespace. Server dry-run
 proves their scope; Secret and cluster-scoped objects are rejected. Atomic
