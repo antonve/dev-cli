@@ -91,8 +91,11 @@ func (staticRunner) Stream(context.Context, string, []string, io.Reader, io.Writ
 type recoveryRunner struct {
 	queries, transfers int
 	installs           int
+	syncErrors         int
+	syncHealthy        int
 	path               string
 	replace, failCopy  bool
+	failInstall        bool
 }
 
 func (r *recoveryRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
@@ -102,6 +105,15 @@ func (r *recoveryRunner) Run(_ context.Context, _ string, args []string, _ io.Re
 	}
 	if strings.Contains(command, "install-frozen") {
 		r.installs++
+		if r.failInstall && r.installs == 1 {
+			return nil, errors.New("dependency install failed")
+		}
+	}
+	if strings.Contains(command, "dev-cli.io/sync-health=error") {
+		r.syncErrors++
+	}
+	if strings.Contains(command, "dev-cli.io/sync-health=healthy") {
+		r.syncHealthy++
 	}
 	if strings.Contains(command, "get pods") {
 		r.queries++
@@ -154,6 +166,42 @@ func TestWatchRecoversWithoutAnotherEdit(t *testing.T) {
 				t.Fatalf("expected failed and retried transfer: %d", r.transfers)
 			}
 		})
+	}
+}
+
+func TestWatchRecoversWhenSourceRevertsToLastSuccessfulHash(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "app.ts")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &recoveryRunner{path: path, failInstall: true}
+	loop := Loop{Bazel: bazel.Bazel{Run: r}, Kube: kube.Client{Run: r, Context: "dev", Namespace: "ns"}, Config: config.Config{Namespace: "ns", Namespaces: []string{"ns"}}, Root: root, Route: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	var revertErr error
+	synced := false
+	err := loop.Watch(ctx, []config.Deployable{{
+		Name:              "web",
+		Kind:              "frontend",
+		SourceRoots:       []string{"app.ts"},
+		SyncPaths:         []string{"app.ts"},
+		DependencyPaths:   []string{"app.ts"},
+		DependencyCommand: []string{"install-frozen"},
+	}}, func(message string) {
+		if strings.Contains(message, "dependency install failed") {
+			revertErr = os.WriteFile(path, []byte("original"), 0600)
+		}
+		if message == "web: synced" {
+			synced = true
+			cancel()
+		}
+	})
+	if err != nil || revertErr != nil {
+		t.Fatalf("watch=%v revert=%v", err, revertErr)
+	}
+	if !synced || r.transfers != 2 || r.installs != 2 || r.syncErrors != 1 || r.syncHealthy != 1 {
+		t.Fatalf("stale failure after revert: synced=%v transfers=%d installs=%d errorRecords=%d healthyRecords=%d", synced, r.transfers, r.installs, r.syncErrors, r.syncHealthy)
 	}
 }
 

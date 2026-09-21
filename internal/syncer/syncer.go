@@ -256,7 +256,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 					report(err.Error())
 					continue
 				}
-				if h == states[i].hash {
+				if h == states[i].hash && states[i].failures == 0 {
 					continue
 				}
 				d := states[i].d
@@ -272,7 +272,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 				}
 				var syncErr error
 				if d.Kind == "frontend" {
-					syncErr = l.syncFrontend(ctx, d, dependencyHash != states[i].dependencyHash)
+					syncErr = l.syncFrontend(ctx, d, dependencyHash != states[i].dependencyHash || states[i].failures > 0)
 				} else {
 					syncErr = l.syncBackend(ctx, d)
 				}
