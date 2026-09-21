@@ -97,7 +97,41 @@ DNS, and data-plane configuration take time to converge.
 The CLI waits for current-generation HTTPRoute Accepted and ResolvedRefs
 conditions before declaring startup complete. Route admission is reported
 separately from workload readiness; it is not proof that an individual request
-used the overlay. Application diagnostics provide that evidence.
+used the overlay. The response headers below provide per-request gateway evidence.
+
+### Response provenance
+
+CLI-owned routes use native Envoy `ResponseHeaderModifier` filters, without
+application changes or gateway-wide patches:
+
+| Header | Meaning |
+| --- | --- |
+| `X-Dev-Selected` | Normalized environment route key, or `base` for a clear link. Selection intent, **not** proof of overlay use. |
+| `X-Dev-Backend` | Envoy's actual selected upstream hostname, or IP:port when no DNS name is available. |
+| `X-Dev-Proxy-Backend` | On a `publicProxy` route, the outer authentication proxy's upstream instead; any internal `X-Dev-Backend` is preserved. |
+
+The backend value uses Envoy's native
+[`%UPSTREAM_HOST_NAME%` formatter](https://www.envoyproxy.io/docs/envoy/v1.39.0/configuration/advanced/substitution_formatter).
+For active/fallback DNS Backends this identifies the overlay or base Service
+actually selected by health-based routing, not merely the matched HTTPRoute.
+Ordinary Service references may yield a pod IP:port instead: inspect endpoints
+to map that address, and do not treat it as a categorical `base`/`overlay` flag.
+On errors this can identify an **attempted** upstream, not a completed response;
+if no upstream was selected it can be empty/absent. Always inspect HTTP status.
+
+Diagnostic request headers are removed before forwarding, and direct data routes
+overwrite upstream diagnostic response values. Public selection is still derived
+from the cookie/query, never a browser routing header. The trusted `publicProxy`
+must preserve internal response headers for API identity to reach the browser.
+An authentication rejection or a clear link through an uninstrumented internal
+base route can have only the proxy header: absence means **unknown**, not base.
+These are development diagnostics, not a security attestation or full hop trace.
+
+Only CLI-owned routes are instrumented. Existing static base routes are untouched;
+unselected, expired or deleted environments may return no diagnostic headers.
+Rerun `dev up` with the new CLI to instrument existing overlays. View headers in
+the browser Network panel or with `curl -D - -o /dev/null '<environment URL>'`.
+This does not add cross-origin JavaScript exposure or change application CORS.
 
 This preserves partial-overlay fallback and internal-hop affinity without a
 service mesh, application router, Kubernetes discovery in application code, or

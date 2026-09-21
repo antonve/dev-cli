@@ -21,20 +21,14 @@ func selectionRule(cfg config.Config, d config.Deployable, selection string, max
 		})
 	}
 	cookie := http.Cookie{Name: cfg.CookieName, Value: selection, Path: "/", Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: maxAge}
-	request := map[string]any{"set": []any{map[string]any{"name": "x-dev-branch", "value": selection}}}
 	if selection == deeplink.Base {
 		cookie.Value, cookie.MaxAge = "", -1
-		request = map[string]any{"remove": []string{"x-dev-branch"}}
 	}
+	filters := routeHeaderFilters(selection, true, d.Proxy(cfg).Name != "")
+	// Add a separate Set-Cookie header: never replace application cookies.
+	filters[1].(map[string]any)["responseHeaderModifier"].(map[string]any)["add"] = []any{map[string]any{"name": "Set-Cookie", "value": cookie.String()}}
 	return map[string]any{
 		"matches": matches, "backendRefs": backends,
-		"filters": []any{
-			map[string]any{"type": "RequestHeaderModifier", "requestHeaderModifier": request},
-			map[string]any{"type": "ResponseHeaderModifier", "responseHeaderModifier": map[string]any{
-				// Add a separate Set-Cookie header: never replace application cookies.
-				"add": []any{map[string]any{"name": "Set-Cookie", "value": cookie.String()}},
-				"set": []any{map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"}},
-			}},
-		},
+		"filters": filters,
 	}
 }

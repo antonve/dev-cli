@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func TestQuerySelectionRules(t *testing.T) {
 				if i == 0 && (len(request.Set) != 1 || request.Set[0].Name != "x-dev-branch" || request.Set[0].Value != selection) {
 					t.Fatal("query did not normalize header")
 				}
-				if i == 1 && (len(request.Remove) != 1 || request.Remove[0] != "x-dev-branch" || len(request.Set) != 0) {
+				if i == 1 && (!slices.Contains(request.Remove, "x-dev-branch") || len(request.Set) != 0) {
 					t.Fatal("base must remove branch context")
 				}
 				response := rule.Filters[1].ResponseHeaderModifier
@@ -103,7 +104,7 @@ func TestQuerySelectionRules(t *testing.T) {
 				if i == 1 && (cookie.Value != "" || cookie.MaxAge != -1) {
 					t.Fatal("base cookie not expired")
 				}
-				if len(response.Set) != 2 || response.Set[0].Name != "Cache-Control" || response.Set[0].Value != "no-store" {
+				if len(response.Set) != 4 || response.Set[0].Name != "Cache-Control" || response.Set[0].Value != "no-store" {
 					t.Fatal("selection response cacheable")
 				}
 			}
