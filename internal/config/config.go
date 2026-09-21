@@ -1,12 +1,14 @@
 package config
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/antonve/dev-cli/internal/document"
 )
 
 type Config struct {
@@ -96,12 +98,19 @@ type Deployable struct {
 }
 
 func Load(path string) (Config, error) {
+	if path == "" {
+		var err error
+		path, err = defaultPath()
+		if err != nil {
+			return Config{}, err
+		}
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
+	if err := document.Unmarshal(b, &c); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	if c.KubeContext == "" || c.Namespace == "" || c.Registry == "" {
@@ -224,6 +233,25 @@ func Load(path string) (Config, error) {
 		}
 	}
 	return c, nil
+}
+
+func defaultPath() (string, error) {
+	var found string
+	for _, path := range []string{".dev/config.yaml", ".dev/config.json"} {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", fmt.Errorf("inspect config %s: %w", path, err)
+		}
+		if found != "" {
+			return "", fmt.Errorf("both .dev/config.yaml and .dev/config.json exist; select one with --config")
+		}
+		found = path
+	}
+	if found == "" {
+		return "", fmt.Errorf("no .dev/config.yaml or .dev/config.json found; create one or pass --config")
+	}
+	return found, nil
 }
 
 func duplicate(values []string) string {

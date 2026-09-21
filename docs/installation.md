@@ -28,7 +28,7 @@ Frontend pods run the repository's pnpm-managed command; the CLI does not
 install or provide a development server. The platform must supply Envoy
 Gateway with the Backend extension enabled and an attachable named Gateway.
 
-Create `.dev/config.json` with `kubeContext`, routing `namespace`, `registry`,
+Create `.dev/config.yaml` with `kubeContext`, routing `namespace`, `registry`,
 `ingressHost`, `ingressClass`, `gatewayName`, `gatewayNamespace`, `cookieName`,
 `ttl`, and `metadataQuery`. Optional `namespaces` and `publicHosts` are explicit
 allowlists (both default to the legacy singular values). `internalGateway`
@@ -38,6 +38,26 @@ example a repository's pinned Linux platform—but not graph-only queries.
 `taskLockNamespace` defaults to the routing namespace. The playground is the
 executable reference:
 https://github.com/antonve/dev-cli-playground/blob/main/.dev/config.json
+
+The CLI discovers `.dev/config.yaml` or the backwards-compatible
+`.dev/config.json`. If both exist, choose explicitly with `--config <path>`;
+it never silently selects another environment. An explicit path may use any
+filename (including `.yml`). For example:
+
+```yaml
+kubeContext: homelab-dev
+namespace: dev-cli-playground
+registry: registry.dev.lab/dev-cli-playground
+ingressHost: dev-cli-playground.dev.lab
+gatewayNamespace: envoy-gateway-system
+```
+
+Config, workload templates, dependencies and task Jobs accept YAML or JSON with
+the same field names and validation. Each file must contain exactly one object;
+duplicate keys and multi-document YAML streams are rejected. Use a Kubernetes
+`List` for multiple dependency objects. Quote string values such as `"on"`,
+`"off"`, `"yes"`, `"no"` and numeric environment values to avoid YAML 1.1 scalar
+coercion. Bazel-generated metadata and Kubernetes API payloads remain JSON.
 
 Every deployable has one Bazel-owned metadata target attached to the build
 inputs it represents. The emitted JSON declares:
@@ -69,7 +89,7 @@ routing call the gateway alias with their logical internal Host and propagate
 the normalized `x-dev-branch`; direct base-Service calls bypass branch
 selection. The playground uses the `dev-cli-gateway` alias.
 
-`workloadTemplate` is a repository-relative JSON `PodTemplateSpec`, not a
+`workloadTemplate` is a repository-relative YAML or JSON `PodTemplateSpec`, not a
 Deployment. `devContainer` defaults to `app`. Its pod labels are discarded and
 replaced with isolated CLI labels; annotations and pod/container configuration
 are preserved. `initContainers` are rejected. Use `${DEV_ROUTE}` and
@@ -85,7 +105,7 @@ fallback Service.
 
 ## Dependency and task declarations
 
-Dependencies contain `name`, allowed `namespace`, repository-relative JSON
+Dependencies contain `name`, allowed `namespace`, repository-relative YAML or JSON
 `manifest`, optional `readiness`, and `retention` (`retain`, the default, or
 `down`). A manifest is one namespaced object or a Kubernetes `List`; Secret and
 cluster-scoped objects are rejected. Each readiness entry supplies `resource`,
@@ -96,7 +116,7 @@ token-aware `name`, optional `timeout`, and exactly one of:
 {"jsonPath":".status.PostgresClusterStatus","value":"Running"}
 ```
 
-Tasks contain `name`, `namespace`, JSON Job `manifest`, stable mutation
+Tasks contain `name`, `namespace`, YAML or JSON Job `manifest`, stable mutation
 `target`, optional dependency names, and optional `timeout`. The target must
 identify the real shared database/environment consistently across every task;
 it is the cross-owner serialization key. A task may also supply `imageName`,
