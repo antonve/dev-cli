@@ -21,7 +21,8 @@
   means the route needs a new dependency name/route; the CLI will not apply over
   a live database. `retain` objects survive config edits, down, and TTL.
 - A timed-out task leaves its Lease held while the Job may still run. Inspect
-  the named Job. A later invocation can recover after the Job is deleted or has
-  a terminal Complete/Failed condition; expiry alone never proves it stopped.
+  the named Job. A later invocation can recover immediately after a terminal
+  Complete/Failed condition, or after both Job deletion and Lease expiry;
+  expiry alone never proves the Job stopped.
 - For operator resources without standard conditions, use `jsonPath` and
   `value` readiness (for example PostgresClusterStatus = Running).

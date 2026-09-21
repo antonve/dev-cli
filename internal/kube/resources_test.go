@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
-	"github.com/antonve/dev-cli/internal/naming"
 )
 
 type resourceRunner struct {
@@ -28,7 +27,7 @@ func (r *resourceRunner) key(args []string, kind, name string) string {
 func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.Reader) ([]byte, error) {
 	verb := args[4]
 	r.calls = append(r.calls, strings.Join(args, " "))
-	if verb == "apply" && strings.Contains(strings.Join(args, " "), "--dry-run=server") {
+	if strings.Contains(strings.Join(args, " "), "--dry-run=server") {
 		b, _ := io.ReadAll(in)
 		return b, nil
 	}
@@ -66,6 +65,8 @@ func (r *resourceRunner) Run(_ context.Context, _ string, args []string, in io.R
 		}
 		if kind == "Lease" {
 			metadata["resourceVersion"] = "2"
+		} else if !strings.Contains(strings.Join(args, " "), "--dry-run=server") {
+			metadata["uid"] = name + "-uid"
 		}
 		if kind == "Job" {
 			if r.activeJob {
@@ -130,11 +131,41 @@ func TestProvisionIsIdempotentAndCollisionSafe(t *testing.T) {
 	}
 }
 
+func TestChangedManifestCannotDeleteOlderRetainedObject(t *testing.T) {
+	t.Chdir(t.TempDir())
+	path := "dependency.json"
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	if err := osWrite(path, `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"retained-${DEV_ROUTE}"}}`); err != nil {
+		t.Fatal(err)
+	}
+	retained := config.Dependency{Name: "db", Namespace: "apps", Manifest: path, Retention: "retain"}
+	if err := c.Provision(context.Background(), retained, "alice", "route-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := osWrite(path, `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"disposable-${DEV_ROUTE}"}}`); err != nil {
+		t.Fatal(err)
+	}
+	disposable := config.Dependency{Name: "db", Namespace: "apps", Manifest: path, Retention: "down"}
+	if err := c.Provision(context.Background(), disposable, "alice", "route-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveDependency(context.Background(), disposable, "alice", "route-a"); err != nil {
+		t.Fatal(err)
+	}
+	if r.objects["apps/configmap/retained-route-a"] == nil {
+		t.Fatal("older retained object was deleted")
+	}
+	if r.objects["apps/configmap/disposable-route-a"] != nil {
+		t.Fatal("disposable object was not deleted")
+	}
+}
+
 func TestTaskTargetLeaseSerializesAcrossTasksAndOwners(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}
 	a := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
-	release, err := c.acquireTaskLock(context.Background(), a, "locks", "apps/route-a/migrate", time.Minute)
+	release, err := c.acquireTaskLock(context.Background(), a, "locks", "apps/migrate-a", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +183,7 @@ func TestTaskTargetLeaseSerializesAcrossTasksAndOwners(t *testing.T) {
 	}
 	b := a
 	b.Name = "seed"
-	if _, err := c.acquireTaskLock(context.Background(), b, "locks", "other/route-b/seed", time.Minute); err == nil || !strings.Contains(err.Error(), "locked") {
+	if _, err := c.acquireTaskLock(context.Background(), b, "locks", "other/seed-b", time.Minute); err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("second lock = %v", err)
 	}
 }
@@ -161,7 +192,7 @@ func TestExpiredLeaseDoesNotBypassActiveJob(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}
 	task := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
-	release, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/route-a/migrate", time.Minute)
+	release, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/migrate-a", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,9 +204,31 @@ func TestExpiredLeaseDoesNotBypassActiveJob(t *testing.T) {
 	}
 	held["spec"].(map[string]any)["renewTime"] = time.Now().Add(-time.Hour).Format(time.RFC3339)
 	r.objects[key], _ = json.Marshal(held)
-	r.objects["apps/job/"+naming.Resource("migrate", "route-a")] = []byte(`{"status":{"active":1}}`)
-	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/route-b/seed", time.Minute); err == nil {
+	r.objects["apps/job/migrate-a"] = []byte(`{"status":{"active":1}}`)
+	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/seed-b", time.Minute); err == nil {
 		t.Fatal("expired lock bypassed active Job")
+	}
+}
+
+func TestTerminalPriorJobCannotProveNewInvocationFinished(t *testing.T) {
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
+	r.objects["apps/job/old-job"] = []byte(`{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`)
+	releaseOld, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/old-job", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a lost release from the completed invocation, then acquire the
+	// next unique Job identity using terminal proof for exactly old-job.
+	_ = releaseOld
+	releaseNew, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/new-job", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNew()
+	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/third-job", time.Minute); err == nil {
+		t.Fatal("terminal old Job incorrectly proved the new invocation finished")
 	}
 }
 
@@ -211,8 +264,8 @@ func TestFailedTaskReturnsBeforeDependentStartup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("task error = %v", err)
 	}
-	if len(r.deletes) != 1 || !strings.Contains(r.deletes[0], "delete jobs -l") || !strings.Contains(r.deletes[0], ServiceLabel+"=migrate") {
-		t.Fatalf("unsafe rerun cleanup: %v", r.deletes)
+	if len(r.deletes) != 0 {
+		t.Fatalf("task rerun deleted prior history: %v", r.deletes)
 	}
 }
 

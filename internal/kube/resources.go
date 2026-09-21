@@ -3,6 +3,7 @@ package kube
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -142,18 +143,6 @@ func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route
 	for _, object := range objects {
 		kind, name := objectIdentity(object)
 		payload, _ := json.Marshal(object)
-		dry, err := c.RunKubectl(ctx, []string{"apply", "--dry-run=server", "-f", "-", "-o", "json"}, bytes.NewReader(payload))
-		if err != nil {
-			return fmt.Errorf("validate dependency %s object %s/%s: %w", d.Name, kind, name, err)
-		}
-		var validated struct {
-			Metadata struct {
-				Namespace string `json:"namespace"`
-			} `json:"metadata"`
-		}
-		if err := json.Unmarshal(dry, &validated); err != nil || validated.Metadata.Namespace != d.Namespace {
-			return fmt.Errorf("dependency %s object %s/%s is not namespaced in %s", d.Name, kind, name, d.Namespace)
-		}
 		existing, err := c.RunKubectl(ctx, []string{"get", kind, name, "--ignore-not-found=true", "-o", "json"}, nil)
 		if err != nil {
 			return err
@@ -165,12 +154,25 @@ func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route
 			var current struct {
 				Metadata struct {
 					Annotations map[string]string `json:"annotations"`
+					Namespace   string            `json:"namespace"`
 				} `json:"metadata"`
 			}
-			if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/manifest-sha256"] != object["metadata"].(map[string]any)["annotations"].(map[string]any)["dev-cli.io/manifest-sha256"] {
+			if json.Unmarshal(existing, &current) != nil || current.Metadata.Namespace != d.Namespace || current.Metadata.Annotations["dev-cli.io/manifest-sha256"] != object["metadata"].(map[string]any)["annotations"].(map[string]any)["dev-cli.io/manifest-sha256"] {
 				return fmt.Errorf("dependency %s object %s/%s differs from its immutable provisioned manifest", d.Name, kind, name)
 			}
 			continue
+		}
+		dry, err := c.RunKubectl(ctx, []string{"create", "--dry-run=server", "-f", "-", "-o", "json"}, bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("validate dependency %s object %s/%s: %w", d.Name, kind, name, err)
+		}
+		var validated struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(dry, &validated); err != nil || validated.Metadata.Namespace != d.Namespace {
+			return fmt.Errorf("dependency %s object %s/%s is not namespaced in %s", d.Name, kind, name, d.Namespace)
 		}
 		if _, err := c.RunKubectl(ctx, []string{"create", "-f", "-"}, bytes.NewReader(payload)); err != nil {
 			return fmt.Errorf("create dependency %s object %s/%s: %w", d.Name, kind, name, err)
@@ -236,13 +238,13 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 		var current struct {
 			Metadata struct {
 				Annotations map[string]string `json:"annotations"`
+				UID         string            `json:"uid"`
 			} `json:"metadata"`
 		}
-		if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/retention"] != "down" {
+		if json.Unmarshal(existing, &current) != nil || current.Metadata.Annotations["dev-cli.io/retention"] != "down" || current.Metadata.UID == "" {
 			return fmt.Errorf("refusing to delete retained dependency object %s/%s", kind, name)
 		}
-		selector := ManagedLabel + "=" + dependencyManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
-		if _, err := c.RunKubectl(ctx, []string{"delete", kind, "-l", selector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
+		if _, err := c.RunKubectl(ctx, []string{"delete", kind, name, "--preconditions=uid=" + current.Metadata.UID, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
 			return err
 		}
 	}
@@ -342,11 +344,10 @@ func terminalJob(data []byte) (bool, error) {
 
 func (c Client) holderJobState(ctx context.Context, holder string) (bool, bool, error) {
 	parts := strings.Split(holder, "/")
-	if len(parts) != 3 {
+	if len(parts) != 2 {
 		return false, false, fmt.Errorf("cannot verify task lock holder %q", holder)
 	}
-	job := naming.Resource(parts[2], parts[1])
-	out, err := c.In(parts[0]).RunKubectl(ctx, []string{"get", "job", job, "--ignore-not-found=true", "-o", "json"}, nil)
+	out, err := c.In(parts[0]).RunKubectl(ctx, []string{"get", "job", parts[1], "--ignore-not-found=true", "-o", "json"}, nil)
 	if err != nil {
 		return false, false, err
 	}
@@ -372,7 +373,7 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 		metadata = map[string]any{}
 		objects[0]["metadata"] = metadata
 	}
-	name := naming.Resource(task.Name, route)
+	name := naming.Resource(task.Name+"-"+strings.ToLower(rand.Text()[:8]), route)
 	metadata["name"] = name
 	annotations, _ := metadata["annotations"].(map[string]any)
 	if annotations == nil {
@@ -412,7 +413,7 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 	if err := c.ensureManaged(ctx, "job", name, taskManaged, owner, route); err != nil {
 		return err
 	}
-	holder := task.Namespace + "/" + route + "/" + task.Name
+	holder := task.Namespace + "/" + name
 	release, err := c.acquireTaskLock(ctx, task, lockNamespace, holder, timeout)
 	if err != nil {
 		return err
@@ -423,10 +424,6 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 			release()
 		}
 	}()
-	selector := ManagedLabel + "=" + taskManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + task.Name
-	if _, err := c.RunKubectl(ctx, []string{"delete", "jobs", "-l", selector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
-		return err
-	}
 	payload, _ := json.Marshal(objects[0])
 	if _, err := c.RunKubectl(ctx, []string{"create", "-f", "-"}, bytes.NewReader(payload)); err != nil {
 		return err
