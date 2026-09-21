@@ -63,10 +63,11 @@ lockfiles in both watching and synchronization inputs. Only Git-tracked or
 unignored-untracked regular files are eligible. Ignored files, `.env*`, common
 generated trees, dependency trees and Bazel outputs are excluded; symlink
 escapes fail closed.
-Base Services must use the declared deployable names. Applications that need
-internal branch routing call the gateway alias with their logical internal
-Host and propagate the normalized `x-dev-branch`; direct base-Service calls
-bypass branch selection. The playground uses the `dev-cli-gateway` alias.
+Base Services default to the declared deployable names; use `baseService` when
+the name, namespace, or port differs. Applications that need internal branch
+routing call the gateway alias with their logical internal Host and propagate
+the normalized `x-dev-branch`; direct base-Service calls bypass branch
+selection. The playground uses the `dev-cli-gateway` alias.
 
 `workloadTemplate` is a repository-relative JSON `PodTemplateSpec`, not a
 Deployment. `devContainer` defaults to `app`. Its pod labels are discarded and

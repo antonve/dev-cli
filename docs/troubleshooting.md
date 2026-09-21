@@ -20,9 +20,20 @@
 - Dependency reprovisioning is intentionally immutable. A manifest-hash error
   means the route needs a new dependency name/route; the CLI will not apply over
   a live database. `retain` objects survive config edits, down, and TTL.
-- A timed-out task leaves its Lease held while the Job may still run. Inspect
-  the named Job. A later invocation can recover immediately after a terminal
-  Complete/Failed condition, or after both Job deletion and Lease expiry;
-  expiry alone never proves the Job stopped.
+- A timed-out or interrupted task leaves its Lease held. A later invocation
+  recovers automatically only when the exact named Job has a terminal
+  Complete/Failed condition. Lease expiry and Job absence are deliberately not
+  proof: the old client may still create the Job after a pause.
+- Recover an abandoned absent-Job holder manually only after proving the
+  original `dev task`/`dev up` process has stopped and
+  `kubectl -n <namespace> get job <job>` reports the exact holder Job as
+  NotFound. Then clear that exact unchanged `<namespace>/<job>` holder with a
+  compare-and-set patch; never delete the Lease or clear a changed holder:
+
+  ```sh
+  kubectl --context <context> -n <lock-namespace> patch lease <lease> \
+    --type=json \
+    -p '[{"op":"test","path":"/spec/holderIdentity","value":"<namespace>/<job>"},{"op":"replace","path":"/spec/holderIdentity","value":""}]'
+  ```
 - For operator resources without standard conditions, use `jsonPath` and
   `value` readiness (for example PostgresClusterStatus = Running).

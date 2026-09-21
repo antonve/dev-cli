@@ -243,6 +243,25 @@ func TestExpiredLeaseDoesNotBypassActiveJob(t *testing.T) {
 	}
 }
 
+func TestExpiredLeaseDoesNotBypassAbsentJob(t *testing.T) {
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Timeout: "1m"}
+	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/paused-job", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	key := "locks/lease/" + lockName(task.Target)
+	var held map[string]any
+	if err := json.Unmarshal(r.objects[key], &held); err != nil {
+		t.Fatal(err)
+	}
+	held["spec"].(map[string]any)["renewTime"] = time.Now().Add(-time.Hour).Format(microTimeFormat)
+	r.objects[key], _ = json.Marshal(held)
+	if _, err := c.acquireTaskLock(context.Background(), task, "locks", "apps/new-job", time.Minute); err == nil || !strings.Contains(err.Error(), "lease/"+lockName(task.Target)) {
+		t.Fatalf("expired absent-Job holder was replaced: %v", err)
+	}
+}
+
 func TestTerminalPriorJobCannotProveNewInvocationFinished(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}

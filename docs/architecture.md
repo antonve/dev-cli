@@ -125,10 +125,13 @@ Tasks accept exactly one Job and preserve its Secret references. A `target`
 identifies the mutated database/environment; one Lease in the shared
 `taskLockNamespace` serializes it across task names, owners and Job namespaces.
 A lock is released only after a terminal Complete or Failed Job condition.
-After interruption, an expired Lease is reusable only when the prior Job is
-absent or terminal. Optional `imageName`, `pushTarget` and `container` fields
-publish the current source revision and inject its digest. Without them, the
-manifest's explicitly pinned image owns provenance.
+After interruption, only the exact prior Job reaching a terminal condition
+permits automatic takeover. Lease expiry or Job absence is not sufficient: the
+prior client may be paused between acquiring the Lease and creating the Job.
+An abandoned absent-Job holder therefore requires the inspected compare-and-set
+recovery in the troubleshooting guide. Optional `imageName`, `pushTarget` and
+`container` fields publish the current source revision and inject its digest.
+Without them, the manifest's explicitly pinned image owns provenance.
 
 The foreground `dev up` process owns local watching. `dev down` removes only
 objects matching both current owner and route labels, including the Backend and

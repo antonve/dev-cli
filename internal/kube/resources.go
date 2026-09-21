@@ -358,13 +358,15 @@ func (c Client) acquireTaskLock(ctx context.Context, task config.Task, lockNames
 			if err != nil {
 				return nil, err
 			}
-			unexpired := now.Before(current.Spec.Renew.Add(time.Duration(current.Spec.Duration) * time.Second))
-			if exists && !terminal || !exists && unexpired {
-				return nil, fmt.Errorf("task target %q is locked by %s", task.Target, current.Spec.Holder)
+			// Absence is not proof that the prior invoker stopped: it may have
+			// paused after taking the Lease and before creating its Job. Only an
+			// exact terminal Job permits automatic takeover.
+			if !exists || !terminal {
+				return nil, fmt.Errorf("task target %q is locked by %s in lease/%s", task.Target, current.Spec.Holder, name)
 			}
 		}
 	}
-	object := map[string]any{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": map[string]any{"name": name, "namespace": lockNamespace, "labels": map[string]any{ManagedLabel: lockManaged}}, "spec": map[string]any{"holderIdentity": holder, "leaseDurationSeconds": duration, "renewTime": now.Format(microTimeFormat)}}
+	object := map[string]any{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": map[string]any{"name": name, "namespace": lockNamespace, "labels": map[string]any{ManagedLabel: lockManaged}, "annotations": map[string]any{"dev-cli.io/task-target": task.Target}}, "spec": map[string]any{"holderIdentity": holder, "leaseDurationSeconds": duration, "renewTime": now.Format(microTimeFormat)}}
 	verb := "create"
 	if current.Metadata.ResourceVersion != "" {
 		object["metadata"].(map[string]any)["resourceVersion"] = current.Metadata.ResourceVersion

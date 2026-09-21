@@ -40,9 +40,10 @@ Provision only explicitly requested dependencies with `dev provision <name>` or
 `dev up --dependency <name>`. `retain` dependencies deliberately survive down
 and TTL. Run repository-defined migrations/seeds with `dev task <name>` or `dev
 up --task <name>` in the required order. A failed/timed-out task blocks that up
-invocation and never triggers reset. Never
-delete a task Lease to bypass serialization; use the normal retry only after the
-prior Job is absent or terminal.
+invocation and never triggers reset. Never delete a task Lease to bypass
+serialization. Normal retry recovers only after the exact prior Job is terminal;
+an absent Job still requires proof that the original client stopped, followed
+by the documented compare-and-set holder recovery.
 
 Keep `dev up` running in a durable terminal/session supported by the environment.
 Record the exact checkout, branch, owner and terminal/log handle. Do not launch
