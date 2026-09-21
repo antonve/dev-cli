@@ -113,7 +113,7 @@ func TestBinaryUploadIsPublishedOnlyAfterSuccessfulCopy(t *testing.T) {
 	for _, fail := range []bool{true, false} {
 		r := &uploadRunner{fail: fail}
 		c := Client{Run: r, Context: "dev", Namespace: "ns"}
-		err := c.SyncBinary(context.Background(), "pod", "/local/binary", "api", "http://localhost:8080/readyz")
+		err := c.SyncBinary(context.Background(), "pod", "app", "/local/binary", "api", "http://localhost:8080/readyz")
 		if (err != nil) != fail {
 			t.Fatalf("fail=%v: %v", fail, err)
 		}
@@ -158,6 +158,75 @@ func TestOverlayOwnershipAndIsolation(t *testing.T) {
 	containers := items[1].(map[string]any)["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
 	if len(containers) != 1 || containers[0].(map[string]any)["image"] != "registry/image@sha256:abc" {
 		t.Fatalf("containers %#v", containers)
+	}
+}
+
+func TestWorkloadTemplatePreservesRuntimeContractAndReplacesSelectors(t *testing.T) {
+	t.Chdir(t.TempDir())
+	template := `{"metadata":{"labels":{"app":"tadoku-api","tier":"base"},"annotations":{"mesh":"enabled"}},"spec":{"serviceAccountName":"tadoku-api","volumes":[{"name":"token","projected":{"sources":[{"serviceAccountToken":{"audience":"tadoku-api","path":"token"}}]}}],"containers":[{"name":"sidecar","image":"sidecar"},{"name":"server","image":"base","args":["--listen=:8000"],"workingDir":"/srv","env":[{"name":"DATABASE_PASSWORD","valueFrom":{"secretKeyRef":{"name":"postgres","key":"password"}}}],"ports":[{"name":"http","containerPort":8000}],"readinessProbe":{"httpGet":{"path":"/healthz","port":"http"}},"resources":{"limits":{"memory":"1Gi"}},"volumeMounts":[{"name":"token","mountPath":"/var/run/token"}]}]}}`
+	if err := os.WriteFile("pod.json", []byte(template), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &captureRunner{}
+	c := Client{Run: r, Context: "dev", Namespace: "tdk-api"}
+	d := config.Deployable{Name: "tadoku-api", Kind: "backend", Namespace: "tdk-api", WorkloadTemplate: "pod.json", DevContainer: "server", Port: 8000, ServicePort: 80, ReadinessPath: "/healthz", ContainerPath: "/app/api"}
+	if err := c.ApplyOverlay(context.Background(), config.Config{Namespace: "routes"}, d, "registry/api@sha256:abc", "alice", "feature", "head", "origin/main", "base", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var list map[string]any
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	items := list["items"].([]any)
+	deployment := items[1].(map[string]any)
+	pod := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	labels := pod["metadata"].(map[string]any)["labels"].(map[string]any)
+	if labels["app"] != nil || labels[RouteLabel] != "route" || labels[ServiceLabel] != "tadoku-api" {
+		t.Fatalf("unsafe labels: %#v", labels)
+	}
+	spec := pod["spec"].(map[string]any)
+	if spec["serviceAccountName"] != "tadoku-api" {
+		t.Fatalf("service account lost: %#v", spec)
+	}
+	containers := spec["containers"].([]any)
+	if len(containers) != 2 {
+		t.Fatalf("containers: %#v", containers)
+	}
+	server := containers[1].(map[string]any)
+	encoded, _ := json.Marshal(server)
+	for _, want := range []string{`"secretKeyRef":{"key":"password","name":"postgres"}`, `"args":["--listen=:8000"]`, `"workingDir":"/srv"`, `"memory":"1Gi"`, `"path":"/healthz"`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("lost %s in %s", want, encoded)
+		}
+	}
+	service := items[2].(map[string]any)
+	port := service["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["port"]
+	if port != float64(80) && port != 80 {
+		t.Fatalf("service port = %#v", port)
+	}
+}
+
+func TestWorkloadTemplateRejectsInitContainers(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("pod.json", []byte(`{"spec":{"initContainers":[{"name":"migrate"}],"containers":[{"name":"app"}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := (Client{Run: &captureRunner{}, Namespace: "ns"}).ApplyOverlay(context.Background(), config.Config{Namespace: "ns"}, config.Deployable{Name: "api", Kind: "backend", Port: 8000, WorkloadTemplate: "pod.json"}, "image", "owner", "branch", "rev", "base", "base-rev", "route", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "initContainers") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
+	r := &captureRunner{}
+	c := Client{Run: r, Context: "dev", Namespace: "routes"}
+	cfg := config.Config{Namespace: "routes", IngressHost: "app.dev.lab", CookieName: "dev_branch", GatewayName: "dev", GatewayNamespace: "gateway"}
+	d := config.Deployable{Name: "api", Namespace: "feature-api", PublicHost: "account.dev.lab", PublicPath: "/", Port: 8000, ServicePort: 8080, ReadinessPath: "/ready", BaseService: config.ObjectRef{Name: "oathkeeper", Namespace: "auth", Port: 4455}}
+	if err := c.ApplyRoutes(context.Background(), cfg, []config.Deployable{d}, map[string]bool{"api": true}, "owner", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(r.payload), `"hostnames":["account.dev.lab"]`) || !strings.Contains(string(r.payload), `api-dev-route.feature-api.svc.cluster.local`) || !strings.Contains(string(r.payload), `oathkeeper.auth.svc.cluster.local`) {
+		t.Fatalf("wrong multi-namespace route: %s", r.payload)
 	}
 }
 

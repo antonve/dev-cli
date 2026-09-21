@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,43 +14,81 @@ import (
 
 	"github.com/antonve/dev-cli/internal/bazel"
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/kube"
 )
 
 type Loop struct {
 	Bazel       bazel.Bazel
 	Kube        kube.Client
+	Config      config.Config
 	Root, Route string
 	TTL         time.Duration
 	KnownFiles  map[string]map[string]bool
 }
 
-func files(root string, roots []string) ([]string, error) {
+func files(r execx.Runner, root string, roots, excludes []string) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, nil
+	}
+	args := []string{"-C", root, "ls-files", "-co", "--exclude-standard", "-z", "--"}
+	for _, path := range roots {
+		if !filepath.IsLocal(path) {
+			return nil, fmt.Errorf("unsafe source root %q", path)
+		}
+		args = append(args, filepath.ToSlash(path))
+	}
+	b, err := r.Run(context.Background(), "git", args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list safe sync files: %w", err)
+	}
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	for _, r := range roots {
-		base := filepath.Join(root, r)
-		err := filepath.WalkDir(base, func(p string, d fs.DirEntry, e error) error {
-			if e != nil {
-				if errors.Is(e, fs.ErrNotExist) {
-					return nil
-				}
-				return e
-			}
-			if d.IsDir() {
-				if d.Name() == "node_modules" || strings.HasPrefix(d.Name(), "bazel-") {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			out = append(out, p)
-			return nil
-		})
+	for _, raw := range strings.Split(strings.TrimSuffix(string(b), "\x00"), "\x00") {
+		if raw == "" || excluded(raw, excludes) {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(raw))
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(physicalRoot, resolved)
+		if err != nil || !filepath.IsLocal(rel) {
+			return nil, fmt.Errorf("sync file escapes repository: %s", raw)
+		}
+		out = append(out, path)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func excluded(path string, patterns []string) bool {
+	path = filepath.ToSlash(path)
+	for _, part := range strings.Split(path, "/") {
+		if part == ".git" || part == "node_modules" || part == ".next" || part == "dist" || part == "coverage" || strings.HasPrefix(part, "bazel-") || part == ".env" || strings.HasPrefix(part, ".env.") {
+			return true
+		}
+	}
+	for _, pattern := range patterns {
+		if ok, _ := filepath.Match(pattern, path); ok {
+			return true
+		}
+	}
+	return false
 }
 func fingerprint(paths []string) (string, error) {
 	h := sha256.New()
@@ -71,11 +109,12 @@ func (l Loop) Initial(ctx context.Context, d config.Deployable) error {
 	return nil
 }
 func (l Loop) syncFrontend(ctx context.Context, d config.Deployable, dependenciesChanged bool) error {
-	p, err := l.Kube.Pod(ctx, d, l.Route)
+	k := l.Kube.In(d.WorkloadNamespace(l.Config))
+	p, err := k.RunningPod(ctx, d, l.Route)
 	if err != nil {
 		return err
 	}
-	paths, err := files(l.Root, d.SyncPaths)
+	paths, err := files(l.Bazel.Run, l.Root, d.SyncPaths, d.SyncExcludes)
 	if err != nil {
 		return err
 	}
@@ -99,11 +138,11 @@ func (l Loop) syncFrontend(ctx context.Context, d config.Deployable, dependencie
 			l.KnownFiles[d.Name][path] = true
 		}
 	}
-	if err := l.Kube.SyncFiles(ctx, p, l.Root, relative, known...); err != nil {
+	if err := k.SyncFiles(ctx, p, d, l.Root, relative, known...); err != nil {
 		return err
 	}
 	if dependenciesChanged && len(d.DependencyCommand) > 0 {
-		_, err := l.Kube.RunKubectl(ctx, append([]string{"exec", p, "-c", "app", "--"}, d.DependencyCommand...), nil)
+		_, err := k.RunKubectl(ctx, append([]string{"exec", p, "-c", d.Container(), "--"}, d.DependencyCommand...), nil)
 		return err
 	}
 	return nil
@@ -113,12 +152,13 @@ func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	if err != nil {
 		return fmt.Errorf("build failed; last working process preserved: %w", err)
 	}
-	p, err := l.Kube.Pod(ctx, d, l.Route)
+	k := l.Kube.In(d.WorkloadNamespace(l.Config))
+	p, err := k.Pod(ctx, d, l.Route)
 	if err != nil {
 		return err
 	}
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)
-	return l.Kube.SyncBinary(ctx, p, out, d.Name, healthURL)
+	return k.SyncBinary(ctx, p, d.Container(), out, d.Name, healthURL)
 }
 func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(string)) error {
 	type state struct {
@@ -131,7 +171,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 	}
 	states := make([]state, 0, len(ds))
 	for _, d := range ds {
-		ps, err := files(l.Root, d.SourceRoots)
+		ps, err := files(l.Bazel.Run, l.Root, d.SourceRoots, d.SyncExcludes)
 		if err != nil {
 			return err
 		}
@@ -139,11 +179,11 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 		if err != nil {
 			return err
 		}
-		_, runtime, err := l.Kube.PodRuntime(ctx, d, l.Route)
+		_, runtime, err := l.Kube.In(d.WorkloadNamespace(l.Config)).PodRuntime(ctx, d, l.Route)
 		if err != nil {
 			return err
 		}
-		dependencyFiles, err := files(l.Root, d.DependencyPaths)
+		dependencyFiles, err := files(l.Bazel.Run, l.Root, d.DependencyPaths, d.SyncExcludes)
 		if err != nil {
 			return err
 		}
@@ -166,8 +206,10 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			if err := l.Kube.Heartbeat(ctx, l.Route, ttl); err != nil {
-				report("heartbeat: " + err.Error())
+			for _, namespace := range l.Config.Namespaces {
+				if err := l.Kube.In(namespace).Heartbeat(ctx, l.Route, ttl); err != nil {
+					report("heartbeat: " + err.Error())
+				}
 			}
 		case <-t.C:
 			for i := range states {
@@ -176,11 +218,11 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 				}
 				if time.Now().After(states[i].checkAt) {
 					states[i].checkAt = time.Now().Add(2 * time.Second)
-					_, runtime, err := l.Kube.PodRuntime(ctx, states[i].d, l.Route)
+					_, runtime, err := l.Kube.In(states[i].d.WorkloadNamespace(l.Config)).PodRuntime(ctx, states[i].d, l.Route)
 					if err != nil {
 						states[i].hash = ""
 						report(states[i].d.Name + ": " + err.Error())
-						if stateErr := l.Kube.RecordSync(ctx, l.Route, states[i].d.Name, err); stateErr != nil {
+						if stateErr := l.Kube.In(states[i].d.WorkloadNamespace(l.Config)).RecordSync(ctx, l.Route, states[i].d.Name, err); stateErr != nil {
 							report(stateErr.Error())
 						}
 						states[i].retryAt = time.Now().Add(2 * time.Second)
@@ -192,7 +234,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 						states[i].runtime = runtime
 					}
 				}
-				ps, err := files(l.Root, states[i].d.SourceRoots)
+				ps, err := files(l.Bazel.Run, l.Root, states[i].d.SourceRoots, states[i].d.SyncExcludes)
 				if err != nil {
 					report(err.Error())
 					continue
@@ -206,7 +248,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 					continue
 				}
 				d := states[i].d
-				dependencyFiles, err := files(l.Root, d.DependencyPaths)
+				dependencyFiles, err := files(l.Bazel.Run, l.Root, d.DependencyPaths, d.SyncExcludes)
 				if err != nil {
 					report(err.Error())
 					continue
@@ -223,7 +265,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 					syncErr = l.syncBackend(ctx, d)
 				}
 				if syncErr != nil {
-					if err := l.Kube.RecordSync(ctx, l.Route, d.Name, syncErr); err != nil {
+					if err := l.Kube.In(d.WorkloadNamespace(l.Config)).RecordSync(ctx, l.Route, d.Name, syncErr); err != nil {
 						report(err.Error())
 					}
 					states[i].failures++
@@ -234,7 +276,7 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 				states[i].hash = h
 				states[i].dependencyHash = dependencyHash
 				states[i].failures = 0
-				if err := l.Kube.RecordSync(ctx, l.Route, d.Name, nil); err != nil {
+				if err := l.Kube.In(d.WorkloadNamespace(l.Config)).RecordSync(ctx, l.Route, d.Name, nil); err != nil {
 					report(err.Error())
 				}
 				report(d.Name + ": synced")

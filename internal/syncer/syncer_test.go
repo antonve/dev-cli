@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/antonve/dev-cli/internal/bazel"
 	"github.com/antonve/dev-cli/internal/config"
+	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/kube"
 )
 
@@ -37,6 +40,54 @@ func TestFingerprintChanges(t *testing.T) {
 	}
 }
 
+func TestFilesUseGitSafeSetAndRejectSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll("src/.next", 0700); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string]string{"src/app.ts": "app", "src/local.ts": "local", "src/.env": "secret", "src/.next/cache": "generated", ".gitignore": "src/.env\nsrc/.next/\n"} {
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "add", "src/app.ts", ".gitignore").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v %s", err, out)
+	}
+	got, err := files(execx.OS{}, root, []string{"src"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || filepath.Base(got[0]) != "app.ts" || filepath.Base(got[1]) != "local.ts" {
+		t.Fatalf("unsafe file set: %v", got)
+	}
+
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files(staticRunner{out: []byte("link/secret\x00")}, root, []string{"link"}, nil); err == nil {
+		t.Fatal("accepted source-root symlink escape")
+	}
+}
+
+type staticRunner struct{ out []byte }
+
+func (r staticRunner) Run(context.Context, string, []string, io.Reader) ([]byte, error) {
+	return r.out, nil
+}
+func (staticRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+
 type recoveryRunner struct {
 	queries, transfers int
 	installs           int
@@ -46,6 +97,9 @@ type recoveryRunner struct {
 
 func (r *recoveryRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
 	command := strings.Join(args, " ")
+	if strings.Contains(command, "ls-files") {
+		return []byte(filepath.Base(r.path) + "\x00"), nil
+	}
 	if strings.Contains(command, "install-frozen") {
 		r.installs++
 	}
@@ -83,7 +137,7 @@ func TestWatchRecoversWithoutAnotherEdit(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := &recoveryRunner{path: path, replace: replace, failCopy: !replace}
-			loop := Loop{Kube: kube.Client{Run: r, Context: "dev", Namespace: "ns"}, Root: root, Route: "test"}
+			loop := Loop{Bazel: bazel.Bazel{Run: r}, Kube: kube.Client{Run: r, Context: "dev", Namespace: "ns"}, Config: config.Config{Namespace: "ns", Namespaces: []string{"ns"}}, Root: root, Route: "test"}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			synced := false
@@ -110,7 +164,7 @@ func TestDependencyCommandOnlyRunsWhenRequested(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &recoveryRunner{path: path}
-	l := Loop{Kube: kube.Client{Run: r}, Root: root, Route: "route", KnownFiles: map[string]map[string]bool{}}
+	l := Loop{Bazel: bazel.Bazel{Run: r}, Kube: kube.Client{Run: r}, Root: root, Route: "route", KnownFiles: map[string]map[string]bool{}}
 	d := config.Deployable{Name: "web", Kind: "frontend", SyncPaths: []string{"app.ts"}, DependencyCommand: []string{"install-frozen"}}
 	for _, changed := range []bool{true, false, false, true} {
 		if err := l.syncFrontend(context.Background(), d, changed); err != nil {
