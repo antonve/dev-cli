@@ -368,7 +368,14 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		return err
 	}
 	if d.Kind == "frontend" {
-		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
+		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		selector := RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
+		// Deployment creation can return before its ReplicaSet creates a Pod.
+		if _, err := c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=create", "--timeout=90s"}, nil); err != nil {
+			return err
+		}
+		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
 		return err
 	}
 	return c.WaitOverlay(ctx, d, route)
