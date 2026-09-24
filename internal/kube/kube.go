@@ -252,6 +252,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	}
 	ann, lbl := annotations(owner, branch, revision, baseRef, baseRevision, image, expiry, created), labels(owner, route, d.Name)
 	ann["dev-cli.io/dev-container"] = d.Container()
+	ann["dev-cli.io/kind"] = d.Kind
 	env := []any{
 		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
 		map[string]any{"name": "DEV_NAMESPACE", "value": c.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": cfg.InternalGateway},
@@ -304,7 +305,10 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	}
 	if d.Kind != "frontend" {
 		command = []any{"/bin/sh", "/dev-cli/supervise.sh"}
-		env = append(env, map[string]any{"name": "DEV_BASE_BINARY", "value": d.ContainerPath}, map[string]any{"name": "DEV_HEALTH_URL", "value": fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)})
+		env = append(env, map[string]any{"name": "DEV_BASE_BINARY", "value": d.ContainerPath})
+		if d.Kind == "backend" || d.Kind == "worker" && d.Port > 0 {
+			env = append(env, map[string]any{"name": "DEV_HEALTH_URL", "value": fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)})
+		}
 		volumes = append(volumes, map[string]any{"name": "work", "emptyDir": map[string]any{}}, map[string]any{"name": "dev-cli-runtime", "configMap": map[string]any{"name": name + "-runtime", "defaultMode": 0555}})
 		mounts = append(mounts, map[string]any{"name": "work", "mountPath": "/work"}, map[string]any{"name": "dev-cli-runtime", "mountPath": "/dev-cli", "readOnly": true})
 		if _, exists := app["securityContext"]; !exists {
@@ -323,11 +327,15 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	}
 	mounts = existingMounts
 	app["image"], app["imagePullPolicy"], app["command"], app["env"], app["volumeMounts"], app["securityContext"] = image, "IfNotPresent", command, env, mounts, security
-	if _, ok := app["ports"]; !ok {
+	if _, ok := app["ports"]; !ok && (d.Kind != "worker" || d.Port > 0) {
 		app["ports"] = []any{map[string]any{"name": "http", "containerPort": d.Port}}
 	}
 	if _, ok := app["readinessProbe"]; !ok {
-		app["readinessProbe"] = map[string]any{"httpGet": map[string]any{"path": d.ReadinessPath, "port": d.Port}, "periodSeconds": 1, "failureThreshold": 15}
+		if d.Kind == "worker" && d.Port == 0 {
+			app["readinessProbe"] = map[string]any{"exec": map[string]any{"command": []any{"/bin/sh", "-c", "generation=$(cat /work/generation) && pid=$(cat /work/pid) && kill -0 \"$pid\" && sleep 1 && test \"$(cat /work/generation)\" = \"$generation\" && test \"$(cat /work/pid)\" = \"$pid\" && kill -0 \"$pid\""}}, "periodSeconds": 1, "timeoutSeconds": 3, "failureThreshold": 15}
+		} else {
+			app["readinessProbe"] = map[string]any{"httpGet": map[string]any{"path": d.ReadinessPath, "port": d.Port}, "periodSeconds": 1, "failureThreshold": 15}
+		}
 	}
 	if _, ok := app["resources"]; !ok {
 		app["resources"] = map[string]any{"requests": map[string]any{"cpu": "10m", "memory": "32Mi"}, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}}
@@ -362,8 +370,11 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 			"template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": podAnnotations}, "spec": podSpec},
 		},
 	}
-	svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
-	items = append(items, deploy, svc)
+	items = append(items, deploy)
+	if d.Kind != "worker" {
+		svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
+		items = append(items, svc)
+	}
 	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
 		return err
 	}
@@ -399,7 +410,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		}
 	}
 	for _, d := range deployables {
-		if d.PublicPath == "" && d.InternalHost == "" {
+		if d.Kind == "worker" || d.PublicPath == "" && d.InternalHost == "" {
 			continue
 		}
 		baseRefs := c.serviceBackendRefs(cfg, d, d.Base(cfg), "base-", owner, branch, revision, baseRef, baseRevision, route, expiry, created, &items)
@@ -697,7 +708,11 @@ func (c Client) generation(ctx context.Context, pod, container string) int {
 func (c Client) waitReady(ctx context.Context, pod, container string, after int, healthURL string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		script := fmt.Sprintf("test $(cat /work/generation 2>/dev/null || echo 0) -gt %d && wget -q -T 1 -O /dev/null %s", after, healthURL)
+		check := "pid=$(cat /work/pid) && kill -0 \"$pid\" && sleep 1 && test \"$(cat /work/generation)\" = \"$generation\" && test \"$(cat /work/pid)\" = \"$pid\" && kill -0 \"$pid\""
+		if healthURL != "" {
+			check = "wget -q -T 1 -O /dev/null " + healthURL
+		}
+		script := fmt.Sprintf("generation=$(cat /work/generation 2>/dev/null || echo 0); test \"$generation\" -gt %d && %s", after, check)
 		if _, err := c.execShell(ctx, pod, container, script); err == nil {
 			return nil
 		}
@@ -706,7 +721,6 @@ func (c Client) waitReady(ctx context.Context, pod, container string, after int,
 	return fmt.Errorf("process did not become ready within %s", timeout)
 }
 func (c Client) SyncBinary(ctx context.Context, pod, container, local, name, healthURL string) error {
-	before := c.generation(ctx, pod, container)
 	// The supervisor must never observe a binary while it is being copied.
 	// Interrupted uploads are inert; only a completed upload becomes next.
 	upload := "/work/upload-" + rand.Text()
@@ -718,6 +732,17 @@ func (c Client) SyncBinary(ctx context.Context, pod, container, local, name, hea
 	if err := c.SyncFile(ctx, pod, container, local, upload); err != nil {
 		return err
 	}
+	comparison, err := c.execShell(ctx, pod, container, "cmp -s "+upload+" /work/current; rc=$?; if [ \"$rc\" -eq 0 ]; then echo same; elif [ \"$rc\" -eq 1 ]; then echo different; else exit \"$rc\"; fi")
+	if err != nil {
+		return fmt.Errorf("compare uploaded binary with running binary: %w", err)
+	}
+	if strings.TrimSpace(string(comparison)) == "same" {
+		return nil
+	}
+	if strings.TrimSpace(string(comparison)) != "different" {
+		return fmt.Errorf("unexpected binary comparison result %q", strings.TrimSpace(string(comparison)))
+	}
+	before := c.generation(ctx, pod, container)
 	if _, err := c.execShell(ctx, pod, container, "chmod 0555 "+upload+" && mv "+upload+" /work/next && kill -TERM \"$(cat /work/pid)\""); err != nil {
 		return err
 	}

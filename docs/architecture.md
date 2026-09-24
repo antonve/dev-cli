@@ -5,6 +5,8 @@ The CLI deliberately has no workload catalog. A Bazel repository defines one
 graph it represents. The emitted JSON names logical application image and push
 targets, runtime kind, readiness path, development command, routes, build
 target, and sync roots. Registry locations remain environment configuration.
+Deployables sharing a `selectionGroup` are selected together when any one is
+affected or explicitly named. An empty group leaves selection independent.
 
 `dev up` computes `merge-base(origin/main, HEAD)` by default, asks Bazel `rdeps`
 which metadata targets are affected, builds only their image targets, and runs
@@ -60,6 +62,17 @@ POSIX supervisor in a ConfigMap, stages a successfully rebuilt Bazel binary in
 an `emptyDir`, signals the process, and waits for the declared readiness URL.
 Compile failures never touch the running binary. A readiness failure triggers a
 swap back to the previous binary and a second readiness check.
+The watch loop compares the rebuilt binary with the running Pod's current
+binary after a staged upload. Identical content keeps its process running even
+when a watched source file changes. Comparing inside the Pod also handles a
+reused overlay whose running binary differs from its base image.
+
+`worker` uses the same supervisor and binary update flow without a Service or
+route. It may declare a private `port` and `readinessPath` pair for an HTTP
+Pod probe and binary replacement check. Without that pair, its default
+readiness probe and replacement check require the same child process to stay
+alive. A repository can supply a stronger application-specific readiness probe
+in its workload template.
 
 ## Routing ownership
 
