@@ -20,6 +20,22 @@ Include your Go binary directory (`go env GOPATH`, followed by `/bin`, unless
 GOBIN is configured) in PATH. Never put a token in a repository URL or commit
 credentials. Existing SSH or an authenticated Git credential helper is enough.
 
+For an existing SSH-only GitHub setup, use per-command URL rewriting (no new
+token or global Git configuration is needed):
+
+```sh
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf \
+GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/antonve/dev-cli \
+go install github.com/antonve/dev-cli/cmd/dev@latest
+```
+
+Check `command -v dev` after installing: an older binary earlier in PATH can
+hide the new one. To update an existing user-local installation deliberately,
+set `GOBIN="$HOME/.local/bin"` on that same install command. Stop your own active
+loops before upgrading; do not stop other developers' loops. v0.4.0 includes
+YAML configuration, multi-host/namespace workflows, dependency/tasks, upstream
+diagnostic headers and cold frontend Pod-creation waiting.
+
 ## Target repository contract
 
 The target repository needs Git, its pinned Bazel version, kubectl, access to

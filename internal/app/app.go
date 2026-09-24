@@ -27,7 +27,7 @@ import (
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.4.0-dev"
+const version = "v0.4.0"
 
 type common struct{ config, owner, base string }
 type stringsFlag []string
