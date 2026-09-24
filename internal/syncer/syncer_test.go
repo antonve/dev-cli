@@ -234,3 +234,59 @@ func TestRetryBackoffIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// Slow cluster housekeeping must neither stall source edits nor outlive Watch.
+// Kubernetes calls are simulated here; the release gate also measures real HMR.
+type heartbeatRunner struct {
+	path    string
+	stopped chan struct{}
+}
+
+func (r *heartbeatRunner) Run(ctx context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
+	command := strings.Join(args, " ")
+	switch {
+	case strings.Contains(command, "dev-cli.io/last-seen-at="):
+		if err := os.WriteFile(r.path, []byte("edited during heartbeat"), 0600); err != nil {
+			return nil, err
+		}
+		<-ctx.Done()
+		close(r.stopped)
+		return nil, ctx.Err()
+	case strings.Contains(command, "ls-files"):
+		return []byte(filepath.Base(r.path) + "\x00"), nil
+	case strings.Contains(command, "get pods"):
+		return []byte(`{"items":[{"metadata":{"name":"pod","uid":"stable"},"status":{"phase":"Running","containerStatuses":[{"name":"app","restartCount":0}]}}]}`), nil
+	}
+	return nil, nil
+}
+
+func (*heartbeatRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+
+func TestWatchSyncsDuringSlowHeartbeatAndJoinsOnShutdown(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "app.ts")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &heartbeatRunner{path: path, stopped: make(chan struct{})}
+	loop := Loop{Bazel: bazel.Bazel{Run: r}, Kube: kube.Client{Run: r, Context: "dev", Namespace: "ns"}, Config: config.Config{Namespace: "ns"}, Root: root, Route: "test", TTL: 3 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	synced := false
+	err := loop.Watch(ctx, []config.Deployable{{Name: "web", Kind: "frontend", SourceRoots: []string{"app.ts"}, SyncPaths: []string{"app.ts"}}}, func(message string) {
+		if message == "web: synced" {
+			synced = ctx.Err() == nil
+			cancel()
+		}
+	})
+	if err != nil || !synced {
+		t.Fatalf("source edit stalled behind heartbeat: synced=%v error=%v", synced, err)
+	}
+	select {
+	case <-r.stopped:
+	default:
+		t.Fatal("Watch returned before heartbeat stopped")
+	}
+}

@@ -51,6 +51,9 @@ Watch retries unsuccessful transfers with a bounded backoff and checks pod UID
 and app restart count every two seconds. A replacement runtime receives the
 current local contents even if no further file is edited. Sync errors and last
 successful sync time are recorded on the owned Deployment for `dev status`.
+TTL heartbeats run independently of source polling and builds, so slow cluster
+bookkeeping cannot pause live edits. Shutdown cancels and joins the heartbeat
+before acknowledging `dev down`; reporting remains on the main watch loop.
 
 Backend images contain only the application. The CLI injects its own versioned
 POSIX supervisor in a ConfigMap, stages a successfully rebuilt Bazel binary in
