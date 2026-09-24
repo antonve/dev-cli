@@ -1,6 +1,6 @@
 ---
 name: dev-cli
-description: Run and verify branch-isolated Kubernetes development environments with the dev CLI in repositories containing .dev/config.yaml or .dev/config.json and Bazel dev_deployable metadata. Use for live frontend/backend edits, clickable environment links, status, logs, handoff and scoped cleanup; not for production deployment or generic local dev servers.
+description: Run and verify branch-isolated Kubernetes development environments with dev-cli in repositories containing .dev/config.yaml or .dev/config.json and Bazel dev_deployable metadata. Use for live edits, branch tasks, multi-host links, status, logs and scoped cleanup; not for production deployment or generic local dev servers.
 ---
 
 # Develop with dev-cli
@@ -18,8 +18,10 @@ require dev-cli v0.3.0 or newer and routes created by that version.
   are within the user's task authority.
   The skill grants no additional deployment, cleanup or publication permission.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
-  `dev doctor`. Doctor is a prerequisite check, not an end-to-end build or routing
-  proof. Do not print kubeconfigs, Git credentials or registry tokens.
+  `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
+  require dev-cli v0.4.0 or newer. Doctor is a prerequisite check, not an
+  end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
+  or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
   and `GOPRIVATE=github.com/antonve/dev-cli` for the private module:
   `go install github.com/antonve/dev-cli/cmd/dev@latest`.
@@ -70,7 +72,8 @@ Return the actual **Open environment** URL printed after startup, or run:
 
 ```sh
 dev url --owner <owner> '/desired/path?existing=value#section'
-dev url --owner <owner> --host account.dev.lab '/desired/path'
+dev url --owner <owner> --host <configured-host> '/desired/path'
+dev url --owner <owner> --host <configured-host> --clear '/desired/path'
 dev url --owner <owner> --clear '/desired/path?existing=value#section'
 ```
 
@@ -100,6 +103,9 @@ HTTPRoute alone does not prove which workload served the request. For partial
 overlays verify each service independently falls back to base; internal calls
 still need the application's existing normalized-header propagation through the
 gateway. Do not promise transparent backend context propagation.
+Where routing headers are available, `X-Dev-Selected` reports the requested
+selection and `X-Dev-Backend` identifies the upstream that served the response.
+Check the latter before attributing a response to an overlay.
 
 For live-edit tests, make a second visible edit while the **same loop** runs.
 Verify frontend HMR in a browser without navigation when possible, backend
