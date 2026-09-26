@@ -180,8 +180,8 @@ func TestSyncDeletionIsLimitedToPreviousManifest(t *testing.T) {
 
 type uploadRunner struct {
 	captureRunner
-	fail               bool
-	upload, activation string
+	fail, same, compareFail bool
+	upload, activation      string
 }
 
 func (r *uploadRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
@@ -192,6 +192,15 @@ func (r *uploadRunner) Run(_ context.Context, _ string, args []string, _ io.Read
 			return nil, errors.New("interrupted copy")
 		}
 	}
+	if strings.Contains(joined, "cmp -s") {
+		if r.compareFail {
+			return nil, errors.New("comparison failed")
+		}
+		if r.same {
+			return []byte("same\n"), nil
+		}
+		return []byte("different\n"), nil
+	}
 	if strings.Contains(joined, "&& mv ") {
 		r.activation = joined
 	}
@@ -199,20 +208,20 @@ func (r *uploadRunner) Run(_ context.Context, _ string, args []string, _ io.Read
 }
 
 func TestBinaryUploadIsPublishedOnlyAfterSuccessfulCopy(t *testing.T) {
-	for _, fail := range []bool{true, false} {
-		r := &uploadRunner{fail: fail}
+	for _, tc := range []struct{ fail, same, compareFail bool }{{fail: true}, {same: true}, {compareFail: true}, {}} {
+		r := &uploadRunner{fail: tc.fail, same: tc.same, compareFail: tc.compareFail}
 		c := Client{Run: r, Context: "dev", Namespace: "ns"}
 		err := c.SyncBinary(context.Background(), "pod", "app", "/local/binary", "api", "http://localhost:8080/readyz")
-		if (err != nil) != fail {
-			t.Fatalf("fail=%v: %v", fail, err)
+		if (err != nil) != (tc.fail || tc.compareFail) {
+			t.Fatalf("case=%+v: %v", tc, err)
 		}
 		if !strings.HasPrefix(r.upload, "pod:/work/upload-") {
 			t.Fatalf("unsafe upload: %q", r.upload)
 		}
-		if fail && r.activation != "" {
-			t.Fatal("failed upload was activated")
+		if (tc.fail || tc.same || tc.compareFail) && r.activation != "" {
+			t.Fatalf("unchanged or failed upload was activated: %+v", tc)
 		}
-		if !fail && !strings.Contains(r.activation, " /work/next && kill -TERM ") {
+		if !tc.fail && !tc.same && !tc.compareFail && !strings.Contains(r.activation, " /work/next && kill -TERM ") {
 			t.Fatal("completed upload not atomically published before restart")
 		}
 	}
@@ -247,6 +256,56 @@ func TestOverlayOwnershipAndIsolation(t *testing.T) {
 	containers := items[1].(map[string]any)["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
 	if len(containers) != 1 || containers[0].(map[string]any)["image"] != "registry/image@sha256:abc" {
 		t.Fatalf("containers %#v", containers)
+	}
+}
+
+func TestWorkerOverlayHasNoServiceOrHTTPProbe(t *testing.T) {
+	r := &captureRunner{}
+	c := Client{Run: r, Context: "dev", Namespace: "ns"}
+	d := config.Deployable{Name: "worker", Kind: "worker", ContainerPath: "/app/worker"}
+	if err := c.ApplyOverlay(context.Background(), config.Config{Namespace: "ns"}, d, "registry/worker@sha256:abc", "alice", "feature", "head", "main", "base", "route", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 2 || list.Items[0]["kind"] != "ConfigMap" || list.Items[1]["kind"] != "Deployment" {
+		t.Fatalf("unexpected worker resources: %+v", list.Items)
+	}
+	spec := list.Items[1]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	app := spec["containers"].([]any)[0].(map[string]any)
+	if app["ports"] != nil || app["readinessProbe"] == nil {
+		t.Fatalf("worker port or readiness: %+v", app)
+	}
+	probe := app["readinessProbe"].(map[string]any)
+	if probe["exec"] == nil || probe["httpGet"] != nil {
+		t.Fatalf("worker needs process readiness: %+v", probe)
+	}
+}
+
+func TestWorkerPrivateHTTPReadinessHasNoService(t *testing.T) {
+	r := &captureRunner{}
+	d := config.Deployable{Name: "worker", Kind: "worker", ContainerPath: "/app/worker", Port: 8000, ReadinessPath: "/readyz"}
+	err := (Client{Run: r, Context: "dev", Namespace: "ns"}).ApplyOverlay(context.Background(), config.Config{Namespace: "ns"}, d, "image", "alice", "branch", "rev", "main", "base", "route", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(r.payload, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("worker created Service: %+v", list.Items)
+	}
+	app := list.Items[1]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	probe := app["readinessProbe"].(map[string]any)["httpGet"].(map[string]any)
+	if probe["path"] != "/readyz" || probe["port"] != float64(8000) && probe["port"] != 8000 {
+		t.Fatalf("private HTTP probe: %+v", probe)
 	}
 }
 

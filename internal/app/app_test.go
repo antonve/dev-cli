@@ -121,3 +121,76 @@ func TestURLCommandNeedsOnlyGitAndConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectionGroupIncludesBothDeployables(t *testing.T) {
+	all := []config.Deployable{
+		{Name: "tadoku-api", SelectionGroup: "tadoku"},
+		{Name: "tadoku-worker", SelectionGroup: "tadoku"},
+		{Name: "web"},
+	}
+	for _, changed := range []string{"tadoku-api", "tadoku-worker"} {
+		got := selectDeployables(all, []config.Deployable{all[indexOf(all, changed)]}, nil)
+		if names(got) != "tadoku-api,tadoku-worker" {
+			t.Fatalf("%s selected %s", changed, names(got))
+		}
+	}
+}
+
+func indexOf(ds []config.Deployable, name string) int {
+	for i := range ds {
+		if ds[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestWorkerValidationRejectsHTTPConfiguration(t *testing.T) {
+	cfg := config.Config{Namespace: "apps", Namespaces: []string{"apps"}}
+	valid := config.Deployable{Name: "worker", Kind: "worker", ContainerPath: "/app/worker"}
+	if err := validateDeployables(cfg, []config.Deployable{valid}); err != nil {
+		t.Fatal(err)
+	}
+	privateHTTP := config.Deployable{Name: "worker", Kind: "worker", ContainerPath: "/app/worker", Port: 8000, ReadinessPath: "/readyz"}
+	if err := validateDeployables(cfg, []config.Deployable{privateHTTP}); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []config.Deployable{
+		{Name: "worker", Kind: "worker", Port: 8000, ContainerPath: "/app/worker"},
+		{Name: "worker", Kind: "worker", ReadinessPath: "/readyz", ContainerPath: "/app/worker"},
+		{Name: "worker", Kind: "worker", Port: 8000, ReadinessPath: "/readyz", ServicePort: 80, ContainerPath: "/app/worker"},
+		{Name: "worker", Kind: "worker", PublicPath: "/jobs", ContainerPath: "/app/worker"},
+		{Name: "worker", Kind: "worker", InternalHost: "worker.internal", ContainerPath: "/app/worker"},
+	} {
+		if err := validateDeployables(cfg, []config.Deployable{invalid}); err == nil {
+			t.Fatalf("accepted HTTP configuration: %+v", invalid)
+		}
+	}
+}
+
+type statusRunner struct{ kind string }
+
+func (r statusRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
+	if strings.Contains(strings.Join(args, " "), "get deployments") {
+		return []byte(`{"items":[{"metadata":{"name":"worker-route","labels":{"dev-cli.io/service":"jobs"},"annotations":{"dev-cli.io/kind":"` + r.kind + `","dev-cli.io/sync-health":"healthy"}},"status":{"readyReplicas":1}}]}`), nil
+	}
+	return []byte(`{"items":[]}`), nil
+}
+
+func (statusRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+
+func TestStatusDistinguishesWorkerOnlyFromMissingHTTPRoute(t *testing.T) {
+	for _, tc := range []struct{ kind, want string }{{"worker", "none"}, {"backend", "pending-or-degraded"}} {
+		k := kube.Client{Run: statusRunner{kind: tc.kind}, Context: "dev", Namespace: "apps"}
+		cfg := config.Config{Namespace: "apps", Namespaces: []string{"apps"}}
+		var out bytes.Buffer
+		if err := status(context.Background(), k, cfg, "alice", "branch", "route", false, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), `"routingHealth": "`+tc.want+`"`) || !strings.Contains(out.String(), `"service": "jobs"`) {
+			t.Fatalf("%s status: %s", tc.kind, out.String())
+		}
+	}
+}

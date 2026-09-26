@@ -183,11 +183,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		return runTask(ctx, k, bz, cfg, f.Arg(0), rev, c.owner, route, stdout)
 	case "up":
-		openURL, err := deeplink.URL(cfg.IngressHost, "/", route)
-		if err != nil {
-			return err
+		openURL, baseURL := "", ""
+		if cfg.IngressHost != "" {
+			openURL, err = deeplink.URL(cfg.IngressHost, "/", route)
+			if err != nil {
+				return err
+			}
+			baseURL, _ = deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
 		}
-		baseURL, _ := deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
 		upCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		release, err := local.Start(stop)
@@ -216,23 +219,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err := validateDeployables(cfg, allDeployables); err != nil {
 			return err
 		}
-		selected := map[string]config.Deployable{}
-		for _, d := range ds {
-			selected[d.Name] = d
-		}
 		for _, name := range selectedServices {
-			d, ok := findDeployable(allDeployables, name)
-			if !ok {
+			if _, ok := findDeployable(allDeployables, name); !ok {
 				return fmt.Errorf("unknown service %q", name)
 			}
-			selected[name] = d
 		}
-		ds = ds[:0]
-		for _, d := range allDeployables {
-			if _, ok := selected[d.Name]; ok {
-				ds = append(ds, d)
-			}
-		}
+		ds = selectDeployables(allDeployables, ds, selectedServices)
 		if len(ds) == 0 {
 			fmt.Fprintln(stdout, "no affected deployables")
 			return nil
@@ -290,8 +282,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err := k.ApplyRoutes(ctx, cfg, allDeployables, affected, c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
 			return err
 		}
-		if err := k.WaitRoutes(ctx, route); err != nil {
-			return err
+		if hasRoutableDeployable(allDeployables) {
+			if err := k.WaitRoutes(ctx, route); err != nil {
+				return err
+			}
 		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
 		for _, d := range ds {
@@ -308,7 +302,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 		}
-		fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
+		if cfg.IngressHost != "" {
+			fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
+		}
 		for _, host := range cfg.PublicHosts {
 			if host == cfg.IngressHost {
 				continue
@@ -338,6 +334,37 @@ func findDeployable(ds []config.Deployable, name string) (config.Deployable, boo
 	return config.Deployable{}, false
 }
 
+func selectDeployables(all, affected []config.Deployable, explicit []string) []config.Deployable {
+	selected, groups := map[string]bool{}, map[string]bool{}
+	for _, d := range affected {
+		selected[d.Name] = true
+	}
+	for _, name := range explicit {
+		selected[name] = true
+	}
+	for _, d := range all {
+		if selected[d.Name] && d.SelectionGroup != "" {
+			groups[d.SelectionGroup] = true
+		}
+	}
+	var result []config.Deployable
+	for _, d := range all {
+		if selected[d.Name] || d.SelectionGroup != "" && groups[d.SelectionGroup] {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
+func hasRoutableDeployable(ds []config.Deployable) bool {
+	for _, d := range ds {
+		if d.Kind != "worker" && (d.PublicPath != "" || d.InternalHost != "") {
+			return true
+		}
+	}
+	return false
+}
+
 func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 	seen := map[string]bool{}
 	for _, d := range ds {
@@ -348,12 +375,18 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 		if !cfg.AllowsNamespace(d.WorkloadNamespace(cfg)) {
 			return fmt.Errorf("deployable %s namespace %q is not allowed", d.Name, d.WorkloadNamespace(cfg))
 		}
-		base := d.Base(cfg)
-		if !cfg.AllowsNamespace(base.Namespace) {
-			return fmt.Errorf("deployable %s base namespace %q is not allowed", d.Name, base.Namespace)
-		}
-		if d.Port < 1 || d.OverlayPort() < 1 || base.Port < 1 {
-			return fmt.Errorf("deployable %s ports must be positive", d.Name)
+		if d.Kind == "worker" {
+			if d.ContainerPath == "" || (d.Port > 0) != (d.ReadinessPath != "") || d.Port < 0 || d.ServicePort != 0 || d.PublicPath != "" || d.InternalHost != "" || d.PublicHost != "" || d.BaseService != (config.ObjectRef{}) || d.PublicProxy != (config.ObjectRef{}) {
+				return fmt.Errorf("deployable %s worker requires containerPath, an optional private port/readinessPath pair, and no Service or routes", d.Name)
+			}
+		} else {
+			base := d.Base(cfg)
+			if !cfg.AllowsNamespace(base.Namespace) {
+				return fmt.Errorf("deployable %s base namespace %q is not allowed", d.Name, base.Namespace)
+			}
+			if d.Port < 1 || d.OverlayPort() < 1 || base.Port < 1 {
+				return fmt.Errorf("deployable %s ports must be positive", d.Name)
+			}
 		}
 		if d.PublicPath != "" && !cfg.AllowsHost(d.Host(cfg)) {
 			return fmt.Errorf("deployable %s publicHost %q is not allowed", d.Name, d.Host(cfg))
@@ -534,6 +567,7 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 	}
 	services := make([]map[string]any, 0, len(v.Items))
 	health := "healthy"
+	workerOnly := len(v.Items) > 0
 	baseRef, baseRevision, sourceRevision, createdAt, expiresAt := "", "", "", "", ""
 	for _, item := range v.Items {
 		if item.Status.ReadyReplicas < 1 {
@@ -546,11 +580,19 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 		if baseRef == "" {
 			baseRef, baseRevision, sourceRevision, createdAt, expiresAt = a["dev-cli.io/base-ref"], a["dev-cli.io/base-revision"], a["dev-cli.io/source-revision"], a["dev-cli.io/created-at"], a["dev-cli.io/expires-at"]
 		}
-		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "workload": item.Metadata.Name, "routing": "overlay", "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
+		routing := "overlay"
+		if a["dev-cli.io/kind"] == "worker" {
+			routing = "none"
+		} else {
+			workerOnly = false
+		}
+		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "kind": a["dev-cli.io/kind"], "workload": item.Metadata.Name, "routing": routing, "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
 	}
 	age := "0s"
 	routingHealth := "ready"
-	if !routes.RoutesReady() {
+	if len(routes.Items) == 0 && workerOnly {
+		routingHealth = "none"
+	} else if !routes.RoutesReady() {
 		routingHealth = "pending-or-degraded"
 	}
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {

@@ -80,7 +80,7 @@ inputs it represents. The emitted JSON declares:
 
 | Concern | Fields |
 | --- | --- |
-| Identity and runtime | `name`, `kind`, container `port`, `readinessPath`, `containerPath`, optional `namespace`, `servicePort` |
+| Identity and runtime | `name`, `kind` (`frontend`, `backend`, or `worker`), `containerPath`, optional `namespace` and `selectionGroup`; HTTP deployables also declare container `port`, `readinessPath`, optional `servicePort` |
 | Build and publication | `buildTarget`, `imageTarget`, `imageName`, `pushTarget` |
 | Workload | optional `workloadTemplate`, `devContainer`, `baseService` |
 | Frontend development | `devCommand`, `sourceRoots`, `syncPaths`, `dependencyPaths`, `dependencyCommand`, optional `syncRoot`, `syncStripPrefix`, `syncExcludes` |
@@ -88,8 +88,14 @@ inputs it represents. The emitted JSON declares:
 
 Image/push targets are registry-neutral. The push target accepts `--repository`
 and `--tag`; the CLI resolves the resulting digest before creating a workload.
-Backend runtime images need a POSIX shell, tar, and wget, plus the application
+Backend runtime images need a POSIX shell, tar, cmp, and wget, plus the application
 binary at `containerPath`. The CLI supplies its supervisor via ConfigMap.
+Workers need a POSIX shell, tar, cmp, and the binary at `containerPath`; they
+omit Services and routes. An optional private `port` and `readinessPath` pair
+enables HTTP Pod readiness and live-sync health checks, and requires wget.
+Without that pair, the default readiness probe checks the supervised child
+process. Set an application-specific probe in `workloadTemplate` when process
+liveness alone is insufficient.
 Frontend images must allow the selected development user to write `syncRoot`
 (`/workspace` by default) and run their normal dev/install commands. Backend
 overlays without a workload template run as UID 65532.
@@ -112,6 +118,12 @@ are preserved. `initContainers` are rejected. Use `${DEV_ROUTE}` and
 `${DEV_NAMESPACE}` in environment-specific names or Secret references. The
 overlay Service exposes `servicePort` (default `port`) and targets numeric
 container `port`, so templates need not call the port `http`.
+
+Use the same nonempty `selectionGroup` on deployables that must start together,
+for example an API and its asynchronous worker. Selecting either through a
+source change or `--service` starts both in one branch environment. The worker
+appears in `dev status`, `dev logs`, `dev down`, and TTL cleanup under its own
+service name and has no browser URL.
 
 For a protected API, set both `publicProxy` (the Oathkeeper/authentication
 Service reference) and `internalHost`. The public route always targets the

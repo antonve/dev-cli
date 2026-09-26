@@ -111,3 +111,12 @@ func TestQuerySelectionRules(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerCreatesNoRoutingResources(t *testing.T) {
+	r := &captureRunner{}
+	d := config.Deployable{Name: "worker", Kind: "worker"}
+	err := (Client{Run: r, Namespace: "ns"}).ApplyRoutes(context.Background(), config.Config{Namespace: "ns"}, []config.Deployable{d}, map[string]bool{"worker": true}, "alice", "branch", "rev", "main", "base", "route", time.Now().Add(time.Hour))
+	if err != nil || r.payload != nil {
+		t.Fatalf("worker route resources: %s, error: %v", r.payload, err)
+	}
+}

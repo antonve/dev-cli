@@ -165,7 +165,10 @@ func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	if err != nil {
 		return err
 	}
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)
+	healthURL := ""
+	if d.Kind == "backend" || d.Kind == "worker" && d.Port > 0 {
+		healthURL = fmt.Sprintf("http://127.0.0.1:%d%s", d.Port, d.ReadinessPath)
+	}
 	return k.SyncBinary(ctx, p, d.Container(), out, d.Name, healthURL)
 }
 func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(string)) error {

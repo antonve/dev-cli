@@ -69,6 +69,7 @@ type Task struct {
 type Deployable struct {
 	Name              string    `json:"name"`
 	Kind              string    `json:"kind"`
+	SelectionGroup    string    `json:"selectionGroup"`
 	BuildTarget       string    `json:"buildTarget"`
 	ImageName         string    `json:"imageName"`
 	ImageTarget       string    `json:"imageTarget"`

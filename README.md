@@ -35,7 +35,9 @@ dev cleanup                    # remove expired dev-cli overlays
 ```
 
 `--service`, `--dependency`, and `--task` are explicit and repeatable; the CLI
-never infers related services or provisions dependencies automatically. `dev up`
+never provisions dependencies automatically. Deployables with the same
+`selectionGroup` are selected together, including when one is named with
+`--service`. `dev up`
 stays in the foreground and supervises live updates. Stop it with
 Ctrl-C; the Kubernetes resources remain until `dev down` or TTL cleanup. It is
 safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
@@ -58,6 +60,8 @@ immutable digest, and injected into the overlay. The CLI injects its own backend
 supervisor and Envoy Gateway routing resources; application repositories do not contain
 CLI runtime tools or routing code. Frontends use their normal pnpm-managed dev
 server (for example Vite, Next.js, or TanStack Start) and native HMR.
+Route-free `worker` deployables run as long-lived Deployments without a Service
+or HTTPRoute. Their default readiness probe checks the supervised process.
 
 See [docs/architecture.md](docs/architecture.md) and
 [docs/troubleshooting.md](docs/troubleshooting.md) for the repository contract,

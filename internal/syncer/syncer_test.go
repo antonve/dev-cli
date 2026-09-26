@@ -40,6 +40,59 @@ func TestFingerprintChanges(t *testing.T) {
 	}
 }
 
+type unchangedBinaryRunner struct {
+	path        string
+	buildFail   bool
+	kubeCalls   int
+	activations int
+}
+
+func (r *unchangedBinaryRunner) Run(_ context.Context, name string, args []string, _ io.Reader) ([]byte, error) {
+	if name == "kubectl" {
+		r.kubeCalls++
+		command := strings.Join(args, " ")
+		if strings.Contains(command, "get pods") {
+			return []byte(`{"items":[{"metadata":{"name":"pod","uid":"stable"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}`), nil
+		}
+		if strings.Contains(command, "cmp -s") {
+			return []byte("same\n"), nil
+		}
+		if strings.Contains(command, "kill -TERM") {
+			r.activations++
+		}
+		return nil, nil
+	}
+	if args[0] == "build" && r.buildFail {
+		return nil, errors.New("compile failed")
+	}
+	if args[0] == "cquery" {
+		return []byte(r.path), nil
+	}
+	return nil, nil
+}
+
+func (*unchangedBinaryRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+
+func TestUnchangedBackendBinaryKeepsRunningProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker")
+	if err := os.WriteFile(path, []byte("same binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &unchangedBinaryRunner{path: path}
+	l := Loop{Bazel: bazel.Bazel{Run: r}, Kube: kube.Client{Run: r}}
+	d := config.Deployable{Name: "api", Kind: "backend", BuildTarget: "//:api"}
+	if err := l.syncBackend(context.Background(), d); err != nil || r.activations != 0 {
+		t.Fatalf("unchanged binary restarted: error=%v activations=%d", err, r.activations)
+	}
+	before := r.kubeCalls
+	r.buildFail = true
+	if err := l.syncBackend(context.Background(), d); err == nil || r.kubeCalls != before {
+		t.Fatalf("failed build touched process: error=%v kubeCalls=%d", err, r.kubeCalls)
+	}
+}
+
 func TestFilesUseGitSafeSetAndRejectSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
