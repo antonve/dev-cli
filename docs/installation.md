@@ -32,7 +32,8 @@ go install github.com/antonve/dev-cli/cmd/dev@latest
 Check `command -v dev` after installing: an older binary earlier in PATH can
 hide the new one. To update an existing user-local installation deliberately,
 set `GOBIN="$HOME/.local/bin"` on that same install command. Stop your own active
-loops before upgrading; do not stop other developers' loops. v0.4.0 includes
+loops before upgrading; do not stop other developers' loops. v0.5.0 adds
+route-free `worker` deployables and `selectionGroup` pairing. v0.4.0 introduced
 YAML configuration, multi-host/namespace workflows, dependency/tasks, upstream
 diagnostic headers and cold frontend Pod-creation waiting.
 
