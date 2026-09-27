@@ -19,7 +19,8 @@ require dev-cli v0.3.0 or newer and routes created by that version.
   The skill grants no additional deployment, cleanup or publication permission.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
   `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
-  require dev-cli v0.4.0 or newer. Doctor is a prerequisite check, not an
+  require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
+  pairing require v0.5.0 or newer. Doctor is a prerequisite check, not an
   end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
   or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
