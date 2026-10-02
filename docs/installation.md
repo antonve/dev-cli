@@ -150,8 +150,8 @@ Tasks contain `name`, `namespace`, YAML or JSON Job `manifest`, stable mutation
 identify the real shared database/environment consistently across every task;
 it is the cross-owner serialization key. A task may also supply `imageName`,
 registry-neutral `pushTarget`, and `container` to publish the current checkout
-and inject its digest. Otherwise the Job manifest must deliberately pin the
-task image; its provenance is independent of the checkout annotation.
+and inject its digest into the named regular or init container. Otherwise the
+Job manifest must deliberately pin the task image; its provenance is independent of the checkout annotation.
 Tasks run only when explicitly named. Repeat `--task` in the required order on
 `dev up`; any failure blocks that invocation before overlays are published or
 created. Ordinary startup never auto-seeds.

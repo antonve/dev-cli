@@ -180,7 +180,9 @@ permits automatic takeover. Lease expiry or Job absence is not sufficient: the
 prior client may be paused between acquiring the Lease and creating the Job.
 An abandoned absent-Job holder therefore requires the inspected compare-and-set
 recovery in the troubleshooting guide. Optional `imageName`, `pushTarget` and
-`container` fields publish the current source revision and inject its digest.
+`container` fields publish the current source revision and inject its digest
+into the named regular or init container. A migration init container can finish
+before a pinned post-migration container runs.
 Without them, the manifest's explicitly pinned image owns provenance.
 
 The foreground `dev up` process owns local watching. `dev down` removes only
