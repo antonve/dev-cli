@@ -221,6 +221,43 @@ func TestTaskTargetLeaseSerializesAcrossTasksAndOwners(t *testing.T) {
 	}
 }
 
+func TestTaskResolvesInitContainerImage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := osWrite("job.json", `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"ignored"},"spec":{"template":{"spec":{"restartPolicy":"Never","initContainers":[{"name":"migrate","image":"invalid.example/unresolved"}],"containers":[{"name":"grants","image":"postgres@sha256:pinned"}]}}}}`); err != nil {
+		t.Fatal(err)
+	}
+	r := &resourceRunner{objects: map[string][]byte{}}
+	c := Client{Run: r, Context: "dev", Namespace: "apps"}
+	task := config.Task{Name: "migrate", Namespace: "apps", Target: "postgres.apps", Manifest: "job.json", Timeout: "1m", Container: "migrate"}
+	if err := c.RunTask(context.Background(), task, "locks", "migration@sha256:resolved", "revision", "alice", "route-a"); err != nil {
+		t.Fatal(err)
+	}
+	for key, body := range r.objects {
+		if !strings.HasPrefix(key, "apps/job/") {
+			continue
+		}
+		var job struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						InitContainers []struct{ Image string }
+						Containers     []struct{ Image string }
+					}
+				}
+			}
+		}
+		if err := json.Unmarshal(body, &job); err != nil {
+			t.Fatal(err)
+		}
+		pod := job.Spec.Template.Spec
+		if pod.InitContainers[0].Image != "migration@sha256:resolved" || pod.Containers[0].Image != "postgres@sha256:pinned" {
+			t.Fatalf("task did not preserve resolved migration and pinned post-step: %s", body)
+		}
+		return
+	}
+	t.Fatal("task created no Job")
+}
+
 func TestExpiredLeaseDoesNotBypassActiveJob(t *testing.T) {
 	r := &resourceRunner{objects: map[string][]byte{}}
 	c := Client{Run: r, Context: "dev", Namespace: "apps"}

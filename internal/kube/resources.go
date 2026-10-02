@@ -467,13 +467,15 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 		if podSpec == nil {
 			return fmt.Errorf("task %s Job has no pod spec", task.Name)
 		}
-		containers, _ := podSpec["containers"].([]any)
 		found := false
-		for _, value := range containers {
-			container, _ := value.(map[string]any)
-			if container["name"] == task.Container {
-				container["image"] = image
-				found = true
+		for _, field := range []string{"containers", "initContainers"} {
+			containers, _ := podSpec[field].([]any)
+			for _, value := range containers {
+				container, _ := value.(map[string]any)
+				if container["name"] == task.Container {
+					container["image"] = image
+					found = true
+				}
 			}
 		}
 		if !found {
