@@ -78,13 +78,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 	}
 	f, c := flags(args[0])
 	noWatch := false
-	clearSelection := false
-	cookieSelection := false
 	urlHost := ""
 	var selectedServices, selectedDependencies, selectedTasks stringsFlag
 	if args[0] == "url" {
-		f.BoolVar(&clearSelection, "clear", false, "link to base and clear the branch cookie")
-		f.BoolVar(&cookieSelection, "cookie", false, "use a base-host cookie selection link")
 		f.StringVar(&urlHost, "host", "", "configured public host")
 	}
 	if args[0] == "up" {
@@ -114,11 +110,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 	route := naming.RouteKey(c.owner, branch)
 	if args[0] == "url" {
 		if f.NArg() > 1 {
-			return errors.New("usage: dev url [--owner owner] [--clear] [/path?query#fragment]")
-		}
-		selection := route
-		if clearSelection {
-			selection = deeplink.Base
+			return errors.New("usage: dev url [--owner owner] [--host public-host] [/path?query#fragment]")
 		}
 		if urlHost == "" {
 			urlHost = cfg.IngressHost
@@ -126,10 +118,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		if !cfg.AllowsHost(urlHost) {
 			return fmt.Errorf("host %q is not in publicHosts", urlHost)
 		}
-		link, err := deeplink.URL(urlHost, f.Arg(0), selection)
-		if cfg.ClusterIssuer != "" && !clearSelection && !cookieSelection {
-			link, err = deeplink.HostURL(urlHost, route, f.Arg(0))
-		}
+		link, err := deeplink.HostURL(urlHost, route, f.Arg(0))
 		if err != nil {
 			return err
 		}
@@ -196,11 +185,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 	case "up":
 		openURL, baseURL := "", ""
 		if cfg.IngressHost != "" {
-			openURL, err = deeplink.URL(cfg.IngressHost, "/", route)
+			openURL, err = deeplink.HostURL(cfg.IngressHost, route, "/")
 			if err != nil {
 				return err
 			}
-			baseURL, _ = deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
+			baseURL = "https://" + cfg.IngressHost + "/"
 		}
 		upCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -329,10 +318,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			if err := k.WaitRoutes(ctx, route); err != nil {
 				return err
 			}
-			if cfg.ClusterIssuer != "" {
+			if len(cfg.PublicHosts) > 0 {
 				name := naming.Resource("tls", route)
 				if err := k.WaitCertificate(ctx, name); err != nil {
-					fmt.Fprintf(stderr, "warning: branch certificate not ready; inspect kubectl --context %s -n %s describe certificate %s; cookie links remain available: %v\n", cfg.KubeContext, cfg.Namespace, name, err)
+					return fmt.Errorf("branch certificate not ready; inspect kubectl --context %s -n %s describe certificate %s: %w", cfg.KubeContext, cfg.Namespace, name, err)
 				}
 			}
 		}
@@ -351,22 +340,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			}
 		}
 		if cfg.IngressHost != "" {
-			if cfg.ClusterIssuer != "" {
-				for _, host := range cfg.PublicHosts {
-					link, _ := deeplink.HostURL(host, route, "/")
-					fmt.Fprintf(stdout, "Open branch host (%s): %s\n", host, link)
-				}
-				fmt.Fprintln(stdout, "Cookie fallback links:")
-			}
 			fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
 		}
 		for _, host := range cfg.PublicHosts {
 			if host == cfg.IngressHost {
 				continue
 			}
-			link, _ := deeplink.URL(host, "/", route)
-			baseLink, _ := deeplink.URL(host, "/", deeplink.Base)
-			fmt.Fprintf(stdout, "Open environment (%s): %s\nOpen base (%s): %s\n", host, link, host, baseLink)
+			link, _ := deeplink.HostURL(host, route, "/")
+			fmt.Fprintf(stdout, "Open environment (%s): %s\nOpen base (%s): https://%s/\n", host, link, host, host)
 		}
 		if noWatch {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
@@ -871,21 +852,15 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 	out["routingHealth"] = routingHealth
 	urls, baseURLs := map[string]string{}, map[string]string{}
 	for _, host := range cfg.PublicHosts {
-		urls[host], _ = deeplink.URL(host, "/", route)
-		baseURLs[host], _ = deeplink.URL(host, "/", deeplink.Base)
+		urls[host], _ = deeplink.HostURL(host, route, "/")
+		baseURLs[host] = "https://" + host + "/"
 	}
-	out["url"], _ = deeplink.URL(cfg.IngressHost, "/", route)
-	out["baseURL"], _ = deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
+	out["url"], _ = deeplink.HostURL(cfg.IngressHost, route, "/")
+	out["baseURL"] = ""
+	if cfg.IngressHost != "" {
+		out["baseURL"] = "https://" + cfg.IngressHost + "/"
+	}
 	out["urls"], out["baseURLs"] = urls, baseURLs
-	if cfg.ClusterIssuer != "" {
-		out["cookieURL"], out["cookieURLs"] = out["url"], urls
-		hostURLs := map[string]string{}
-		for _, host := range cfg.PublicHosts {
-			hostURLs[host], _ = deeplink.HostURL(host, route, "/")
-		}
-		out["url"], _ = deeplink.HostURL(cfg.IngressHost, route, "/")
-		out["urls"] = hostURLs
-	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil

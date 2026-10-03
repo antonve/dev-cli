@@ -78,56 +78,26 @@ func TestURLCommandNeedsOnlyGitAndConfig(t *testing.T) {
 	if err := os.Mkdir(".dev", 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(".dev/config.json", []byte(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test","ingressHost":"app.dev.lab"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, clear := range []bool{false, true} {
-		args := []string{"url", "--owner", "alice"}
-		want := naming.RouteKey("alice", "feature/demo")
-		if clear {
-			args = append(args, "--clear")
-			want = "base"
-		}
-		args = append(args, "/settings?tab=profile#details")
-		var out, stderr bytes.Buffer
-		if err := Run(context.Background(), args, &out, &stderr); err != nil {
-			t.Fatal(err)
-		}
-		u, err := url.Parse(strings.TrimSpace(out.String()))
-		if err != nil || u.Query().Get("dev-branch") != want || u.Path != "/settings" || u.Fragment != "details" {
-			t.Fatalf("wrong URL: %s", out.String())
-		}
-	}
-	var out bytes.Buffer
-	if err := Run(context.Background(), []string{"url", "--owner", "alice", "https://evil.test/"}, &out, &out); err == nil {
-		t.Fatal("accepted external destination")
-	}
 	if err := os.WriteFile(".dev/config.json", []byte(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test","ingressHost":"app.dev.lab","clusterIssuer":"lab-ca-acme"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"host", "cookie", "clear"} {
-		args := []string{"url", "--owner", "alice"}
-		if mode != "host" {
-			args = append(args, "--"+mode)
-		}
-		args = append(args, "/settings?tab=profile#details")
-		out.Reset()
-		if err := Run(context.Background(), args, &out, &out); err != nil {
-			t.Fatal(err)
-		}
-		u, err := url.Parse(strings.TrimSpace(out.String()))
-		route := naming.RouteKey("alice", "feature/demo")
-		if err != nil || u.Path != "/settings" || u.Fragment != "details" || u.Query().Get("tab") != "profile" {
-			t.Fatalf("lost destination: %s", out.String())
-		}
-		if mode == "host" && (u.Host != route+".app.dev.lab" || u.Query().Has("dev-branch")) {
-			t.Fatalf("wrong host URL: %s", out.String())
-		}
-		if mode == "cookie" && u.Query().Get("dev-branch") != route || mode == "clear" && u.Query().Get("dev-branch") != "base" {
-			t.Fatalf("wrong fallback URL: %s", out.String())
+	var out bytes.Buffer
+	if err := Run(context.Background(), []string{"url", "--owner", "alice", "/settings?tab=profile#details"}, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(strings.TrimSpace(out.String()))
+	if err != nil || u.Host != naming.RouteKey("alice", "feature/demo")+".app.dev.lab" || u.Path != "/settings" || u.Fragment != "details" || u.Query().Get("tab") != "profile" || u.Query().Has("dev-branch") {
+		t.Fatalf("wrong host URL: %s", out.String())
+	}
+	for _, flag := range []string{"--clear", "--cookie"} {
+		if err := Run(context.Background(), []string{"url", "--owner", "alice", flag}, &out, &out); err == nil {
+			t.Fatalf("obsolete flag accepted: %s", flag)
 		}
 	}
-	if err := os.WriteFile(".dev/config.yaml", []byte("kubeContext: dev\nnamespace: ns\nregistry: registry.test\ningressHost: yaml.dev.lab\n"), 0600); err != nil {
+	if err := Run(context.Background(), []string{"url", "--owner", "alice", "https://evil.test/"}, &out, &out); err == nil {
+		t.Fatal("accepted external destination")
+	}
+	if err := os.WriteFile(".dev/config.yaml", []byte("clusterIssuer: lab-ca-acme\nkubeContext: dev\nnamespace: ns\nregistry: registry.test\ningressHost: yaml.dev.lab\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, explicit := range []bool{true, false} {
@@ -141,7 +111,7 @@ func TestURLCommandNeedsOnlyGitAndConfig(t *testing.T) {
 		if err := Run(context.Background(), args, &out, &out); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasPrefix(out.String(), "https://yaml.dev.lab/") {
+		if out.String() != "https://"+naming.RouteKey("alice", "feature/demo")+".yaml.dev.lab/\n" {
 			t.Fatalf("YAML command selected wrong config: %s", out.String())
 		}
 	}

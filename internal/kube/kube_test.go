@@ -412,12 +412,12 @@ func TestWorkloadTemplateRejectsInitContainers(t *testing.T) {
 func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
 	r := &captureRunner{}
 	c := Client{Run: r, Context: "dev", Namespace: "routes"}
-	cfg := config.Config{Namespace: "routes", IngressHost: "app.dev.lab", CookieName: "dev_branch", GatewayName: "dev", GatewayNamespace: "gateway"}
+	cfg := config.Config{Namespace: "routes", IngressHost: "app.dev.lab", ClusterIssuer: "lab-ca-acme", GatewayName: "dev", GatewayNamespace: "gateway"}
 	d := config.Deployable{Name: "api", Namespace: "feature-api", PublicHost: "account.dev.lab", PublicPath: "/", InternalHost: "api.internal", Port: 8000, ServicePort: 8080, ReadinessPath: "/ready", BaseService: config.ObjectRef{Name: "api", Namespace: "base-api", Port: 80}, PublicProxy: config.ObjectRef{Name: "oathkeeper", Namespace: "auth", Port: 4455}}
 	if err := c.ApplyRoutes(context.Background(), cfg, []config.Deployable{d}, map[string]bool{"api": true}, "owner", "branch", "rev", "base", "base-rev", "route", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(r.payload), `"hostnames":["account.dev.lab"]`) || !strings.Contains(string(r.payload), `api-dev-route.feature-api.svc.cluster.local`) || !strings.Contains(string(r.payload), `oathkeeper.auth.svc.cluster.local`) {
+	if !strings.Contains(string(r.payload), `"hostnames":["route.account.dev.lab"]`) || !strings.Contains(string(r.payload), `api-dev-route.feature-api.svc.cluster.local`) || !strings.Contains(string(r.payload), `oathkeeper.auth.svc.cluster.local`) {
 		t.Fatalf("wrong multi-namespace route: %s", r.payload)
 	}
 	var list struct {
@@ -437,7 +437,7 @@ func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
 			continue
 		}
 		got := item.Spec.Rules[0].BackendRefs[0].Name
-		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "account.dev.lab" && got != naming.Resource("proxy-api", "route") {
+		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "route.account.dev.lab" && got != naming.Resource("proxy-api", "route") {
 			t.Fatalf("public route bypasses proxy: %s", got)
 		}
 		if len(item.Spec.Hostnames) > 0 && item.Spec.Hostnames[0] == "api.internal" && got != naming.Resource("active-api", "route") {
@@ -449,7 +449,7 @@ func TestRoutesSupportCrossNamespaceBaseAndPerServiceHosts(t *testing.T) {
 func TestRoutesUseOverlayAndBaseIndependently(t *testing.T) {
 	r := &captureRunner{}
 	c := Client{Run: r, Context: "dev", Namespace: "ns"}
-	cfg := config.Config{IngressHost: "playground.dev.lab", CookieName: "dev_branch", GatewayName: "dev", GatewayNamespace: "gateway-system"}
+	cfg := config.Config{IngressHost: "playground.dev.lab", ClusterIssuer: "lab-ca-acme", GatewayName: "dev", GatewayNamespace: "gateway-system"}
 	ds := []config.Deployable{
 		{Name: "hello-api", PublicPath: "/api", Port: 8081},
 		{Name: "echo-api", InternalHost: "echo-api.internal", Port: 8082},
@@ -465,7 +465,7 @@ func TestRoutesUseOverlayAndBaseIndependently(t *testing.T) {
 	publicBackend := items[3].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]
 	filters := items[3].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["filters"]
 	encoded, _ := json.Marshal(filters)
-	if !strings.Contains(string(encoded), `"name":"Cache-Control","value":"no-store"`) || !strings.Contains(string(encoded), `"name":"Vary","value":"Cookie"`) {
+	if !strings.Contains(string(encoded), `"name":"Cache-Control","value":"no-store"`) || strings.Contains(string(encoded), `"name":"Vary"`) {
 		t.Fatalf("public routes allow cross-branch browser caching: %s", encoded)
 	}
 	internalBackend := items[4].(map[string]any)["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)["backendRefs"].([]any)[0].(map[string]any)["name"]

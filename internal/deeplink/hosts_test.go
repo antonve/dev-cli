@@ -3,8 +3,8 @@ package deeplink
 import "testing"
 
 func TestHostURL(t *testing.T) {
-	got, err := HostURL("app.dev.lab", "alice-x-1a2b3c4d", "/settings?tab=profile&dev-branch=old#details")
-	if err != nil || got != "https://alice-x-1a2b3c4d.app.dev.lab/settings?tab=profile#details" {
+	got, err := HostURL("app.dev.lab", "alice-x-1a2b3c4d", "/settings?tab=profile&tag=a&tag=b#details")
+	if err != nil || got != "https://alice-x-1a2b3c4d.app.dev.lab/settings?tab=profile&tag=a&tag=b#details" {
 		t.Fatalf("%s %v", got, err)
 	}
 	for _, route := range []string{"", "-x", "x-", "a.b", "UPPER", "a/b"} {

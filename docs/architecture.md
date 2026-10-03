@@ -77,31 +77,31 @@ in its workload template.
 
 ## Routing ownership
 
-With `clusterIssuer`, the CLI owns one host-only HTTPRoute per public deployable
+The required `clusterIssuer` lets the CLI own one host-only HTTPRoute per public deployable
 and one Ingress covering every `<route>.<publicHost>`. Host routes set the
-trusted branch header and use the same proxy or active/base backend references
-as cookie routes. Health policies include direct host routes. The Ingress
+trusted branch header and retain authentication proxy or active/base backend
+references. Health policies include direct host routes. The Ingress
 forwards to the routing namespace's `dev-cli-gateway` Service and requests TLS
 through cert-manager. Down/expiry remove the owned Ingress. cert-manager must
 run with `--enable-certificate-owner-ref=true`, so deleting the Ingress removes
 its Certificate and Secret. Startup waits for certificate creation and readiness
-within one 120-second deadline, then warns on failure while the cookie fallback
-remains available. Doctor checks the
+within one 120-second deadline and fails with a describe hint if TLS is not
+ready. Doctor checks the
 issuer, gateway Service and Ingress/certificate permissions.
 
 Browser selection uses [gateway-owned deep links](deep-links.md): `dev up` and
 `dev status` expose URLs, while `dev url` preserves a supplied deep destination.
-GET/HEAD query matches override old cookies and set/clear the cookie at Envoy.
+Only the branch hostname selects an environment.
 Guest frontends need no dev-specific code.
 
 The current routing adapter requires Envoy Gateway with its Backend extension
 enabled (`config.envoyGateway.extensionApis.enableBackend: true`) and a named
-Gateway. It is not portable to every Gateway API implementation: cookie regex
-matching and health-based failover depend on this provider. The
+Gateway. It is not portable to every Gateway API implementation: health-based
+failover depends on this provider. The
 base application declares ordinary HTTPRoutes. Deployables independently name
 their workload namespace, public host, overlay Service port, and base Service
 name/namespace/port. A public route matches
-the scoped cookie and replaces `x-dev-branch` with the route key; the platform's
+the branch hostname and replaces `x-dev-branch` with the route key; the platform's
 base routes remove an untrusted browser header. An internal route matches the
 normalized header propagated by an application. When `publicProxy` is set, the
 public route always targets that authentication proxy and the overlay is
@@ -150,9 +150,9 @@ if no upstream was selected it can be empty/absent. Always inspect HTTP status.
 
 Diagnostic request headers are removed before forwarding, and direct data routes
 overwrite upstream diagnostic response values. Public selection is still derived
-from the cookie/query, never a browser routing header. The trusted `publicProxy`
+from the hostname, never a browser routing header. The trusted `publicProxy`
 must preserve internal response headers for API identity to reach the browser.
-An authentication rejection or a clear link through an uninstrumented internal
+An authentication rejection or a call through an uninstrumented internal
 base route can have only the proxy header: absence means **unknown**, not base.
 These are development diagnostics, not a security attestation or full hop trace.
 

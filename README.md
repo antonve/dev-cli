@@ -27,8 +27,6 @@ dev provision branch-db       # explicit, on-demand dependency
 dev task migrate              # serialized repository-owned Job
 dev url '/settings?tab=profile' # clickable branch link; no cluster mutation
 dev url --host account.dev.lab '/settings'
-dev url --cookie '/settings'    # legacy base-host cookie fallback
-dev url --clear '/settings'     # select base and clear the branch cookie
 dev status
 dev logs [service]
 dev down
@@ -43,14 +41,12 @@ stays in the foreground and supervises live updates. Stop it with
 Ctrl-C; the Kubernetes resources remain until `dev down` or TTL cleanup. It is
 safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
 identity. `dev up` prints clickable environment and base links; `dev status`
-includes both URLs. With `clusterIssuer`, v0.8.0 creates a branch hostname for
-each public host, a shared branch Ingress and certificate, and defaults links
-to those hosts. `dev url --cookie` and `--clear` retain the legacy fallback.
-Without `clusterIssuer`, Envoy selects the branch and sets the browser cookie from
-the `dev-branch` query parameter, with no frontend integration or manual menu.
-Each configured public host has an independent host-only selection cookie.
-Existing paths, query parameters and fragments are preserved. See
-[deep links](docs/deep-links.md) for selection precedence and limits.
+includes branch and plain base URLs. v0.9.0 requires `clusterIssuer` and creates
+`https://<route>.<publicHost>/` for each public host, with an owned Ingress and
+certificate. Branch hosts are the only selection mechanism; separate owners
+work in one browser profile. Existing paths, query parameters and fragments
+are preserved. See [deep links](docs/deep-links.md) for the host contract and
+upgrade instructions.
 
 CLI-routed responses report `X-Dev-Selected` and Envoy's actual upstream in
 `X-Dev-Backend`, so an overlay selection can be distinguished from base fallback.

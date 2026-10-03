@@ -10,7 +10,7 @@ import (
 
 func TestProfilePrefixMatchingAndFirstMatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := `{"kubeContext":"dev","namespace":"ns","registry":"registry.test","variables":{"DATABASE":"base","LOCATION":"${DEV_NAMESPACE}/${DEV_ROUTE}"},"tasks":[{"name":"tenant","namespace":"ns","target":"db","manifest":"task.yaml"},{"name":"migrate","namespace":"ns","target":"db","manifest":"task.yaml"},{"name":"after","namespace":"ns","target":"db","manifest":"task.yaml"}],"hooks":{"beforeUp":["tenant"],"afterDown":["after"],"deployables":{"worker":{"beforeStart":["tenant"],"afterStop":["after"]}}},"profiles":[{"name":"isolated","whenChanged":["migrations/"],"variables":{"DATABASE":"tadoku-${DEV_ROUTE}"},"hooks":{"beforeUp":["migrate","tenant"],"deployables":{"worker":{"beforeStart":[]}}}},{"name":"later","whenChanged":["migrations/"],"variables":{"DATABASE":"later"}}]}`
+	data := `{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"ns","registry":"registry.test","variables":{"DATABASE":"base","LOCATION":"${DEV_NAMESPACE}/${DEV_ROUTE}"},"tasks":[{"name":"tenant","namespace":"ns","target":"db","manifest":"task.yaml"},{"name":"migrate","namespace":"ns","target":"db","manifest":"task.yaml"},{"name":"after","namespace":"ns","target":"db","manifest":"task.yaml"}],"hooks":{"beforeUp":["tenant"],"afterDown":["after"],"deployables":{"worker":{"beforeStart":["tenant"],"afterStop":["after"]}}},"profiles":[{"name":"isolated","whenChanged":["migrations/"],"variables":{"DATABASE":"tadoku-${DEV_ROUTE}"},"hooks":{"beforeUp":["migrate","tenant"],"deployables":{"worker":{"beforeStart":[]}}}},{"name":"later","whenChanged":["migrations/"],"variables":{"DATABASE":"later"}}]}`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestProfileAndVariableValidation(t *testing.T) {
 		`,"profiles":[{"name":"bad","whenChanged":["a/"],"hooks":{"beforeUp":["missing"]}}]`,
 	} {
 		path := filepath.Join(t.TempDir(), "config.json")
-		if err := os.WriteFile(path, []byte(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test"`+extra+`}`), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(`{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"ns","registry":"registry.test"`+extra+`}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := Load(path); err == nil {
@@ -62,7 +62,7 @@ func TestProfileAndVariableValidation(t *testing.T) {
 }
 func TestUnknownVariableInVariableValueRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test","variables":{"DATABASE":"${DEV_VAR_OTHER}"}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"ns","registry":"registry.test","variables":{"DATABASE":"${DEV_VAR_OTHER}"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "DEV_VAR") {

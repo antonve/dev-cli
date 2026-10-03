@@ -52,7 +52,7 @@ func (r *certificateRunner) Run(ctx context.Context, command string, args []stri
 }
 
 func TestUpWaitsForCertificateCreationAndReadiness(t *testing.T) {
-	for _, issuer := range []string{"lab-ca-acme", ""} {
+	for _, issuer := range []string{"lab-ca-acme"} {
 		t.Run(issuer, func(t *testing.T) {
 			base, cfg, _ := lifecycleFixture(t)
 			cfg.Hooks.BeforeUp = nil

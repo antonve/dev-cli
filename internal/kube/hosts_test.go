@@ -14,7 +14,7 @@ import (
 )
 
 func TestBranchHostRoutes(t *testing.T) {
-	for _, issuer := range []string{"", "lab-ca-acme"} {
+	for _, issuer := range []string{"lab-ca-acme"} {
 		t.Run(issuer, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
 			raw := map[string]any{"kubeContext": "dev", "namespace": "ns", "registry": "registry.test", "ingressHost": "app.dev.lab", "publicHosts": []string{"app.dev.lab", "account.dev.lab"}}
@@ -50,12 +50,7 @@ func TestBranchHostRoutes(t *testing.T) {
 			}
 			for _, d := range ds {
 				hostRoute := objects[naming.Resource("route-host-"+d.Name, route)]
-				if issuer == "" {
-					if hostRoute != nil {
-						t.Fatal("unexpected host route")
-					}
-					continue
-				}
+
 				if hostRoute == nil {
 					t.Fatal("missing host route", d.Name)
 				}
@@ -72,22 +67,14 @@ func TestBranchHostRoutes(t *testing.T) {
 				if len(matches) != 1 || len(matches[0].(map[string]any)) != 1 {
 					t.Fatal("host route requires only path matching", matches)
 				}
-				cookieName := naming.Resource("route-"+d.Name, route)
-				if d.InternalHost != "" {
-					cookieName = naming.Resource("route-public-"+d.Name, route)
+				refs := rule["backendRefs"].([]any)
+				if d.Name == "api" && refs[0].(map[string]any)["name"] != "proxy" {
+					t.Fatal("public API bypasses authentication", refs)
 				}
-				cookieRule := objects[cookieName]["spec"].(map[string]any)["rules"].([]any)[0].(map[string]any)
-				if !reflect.DeepEqual(rule["backendRefs"], cookieRule["backendRefs"]) || !reflect.DeepEqual(rule["filters"], cookieRule["filters"]) {
-					t.Fatal("host bypasses existing routing or auth", rule)
-				}
+
 			}
 			ingress := objects[naming.Resource("hosts", route)]
-			if issuer == "" {
-				if ingress != nil {
-					t.Fatal("unexpected ingress")
-				}
-				return
-			}
+
 			if ingress == nil {
 				t.Fatal("missing ingress")
 			}

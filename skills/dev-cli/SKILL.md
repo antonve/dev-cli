@@ -80,38 +80,28 @@ sync and is not live development.
 
 ## Give the user a clickable link
 
-With `clusterIssuer`, v0.8.0 prints branch-host links that require no selection
-cookie. Open these directly; each branch is its own origin. `dev url --cookie`
-and `--clear` retain the base-host cookie fallback described below. Verify TLS
-readiness and owned Ingress/Certificate/Secret removal on down; cert-manager
-must enable certificate owner references for Secret cleanup.
+v0.9.0 requires `clusterIssuer` and prints branch-host links. Each branch is its
+own browser origin, so independent owners work in one profile. Application login
+remains application-owned. Verify TLS readiness and owned Ingress/Certificate/
+Secret removal on down; cert-manager must enable certificate owner references.
+Startup fails with a describe hint when its certificate is not ready.
 
 Return the actual **Open environment** URL printed after startup, or run:
 
 ```sh
 dev url --owner <owner> '/desired/path?existing=value#section'
 dev url --owner <owner> --host <configured-host> '/desired/path'
-dev url --owner <owner> --host <configured-host> --clear '/desired/path'
-dev url --owner <owner> --clear '/desired/path?existing=value#section'
 ```
 
-Quote destinations containing `&`, `?` or `#`. `dev url` only formats a link; it
-does not start or verify an environment. `dev status` includes `url`, `baseURL`,
-workload and sync health. Never ask the user to copy a route key into a menu.
+Quote destinations containing `&`, `?` or `#`. `dev url` only formats a link;
+it does not start or verify an environment. `dev status` includes branch `url`,
+plain `baseURL`, per-host maps, workload and sync health. Never ask the user to
+copy a route key into a menu. Paths, queries and fragments are preserved.
+Lab DNS/network/CA access is still required. Links are not access control.
 
-Envoy handles `dev-branch=<route-key>` on GET/HEAD, overrides an old branch cookie
-for the first request and sets the host-only Secure, SameSite=Lax cookie. `base`
-clears it and uses base services immediately. The path, other query parameters
-and fragment remain in the link; the selector is not removed or hidden from the
-application. No frontend integration is needed. Query selection is not supported
-on POST or other mutation methods. Unknown/deleted selections do not create an
-overlay; normal existing-cookie/base routing applies. Base-clear rules exist
-while at least one v0.3+ environment has routes on that host.
-
-The cookie is shared across tabs for one host in the same browser profile;
-configured public hosts are selected independently. Use separate profiles or
-isolated contexts for simultaneous selections on one host. Lab DNS/network/CA
-access is still required. Links are not authentication or access control.
+For a v0.6–v0.8 environment, stop its loop, add `clusterIssuer`, remove a legacy
+`cookieName` config key, then rerun up or run down with the new CLI. Rerunning
+retires only that owner/route's old public selection rules. Use the new links.
 
 ## Prove the result and hand off
 

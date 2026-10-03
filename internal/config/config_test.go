@@ -8,29 +8,29 @@ import (
 	"testing"
 )
 
-func TestRejectInvalidCookieAndTTL(t *testing.T) {
-	for _, tc := range []struct{ cookie, ttl string }{{"bad;cookie", "8h"}, {"dev_branch", "0s"}, {"dev_branch", "500ms"}, {"dev_branch", "invalid"}} {
+func TestRejectInvalidTTL(t *testing.T) {
+	for _, ttl := range []string{"0s", "500ms", "invalid"} {
 		p := filepath.Join(t.TempDir(), "config.json")
-		data := fmt.Sprintf(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test","cookieName":%q,"ttl":%q}`, tc.cookie, tc.ttl)
+		data := fmt.Sprintf(`{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"ns","registry":"registry.test","ttl":%q}`, ttl)
 		if err := os.WriteFile(p, []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := Load(p); err == nil {
-			t.Fatalf("accepted %+v", tc)
+			t.Fatalf("accepted %q", ttl)
 		}
 	}
 }
 
 func TestLoadDefaults(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(p, []byte(`{"kubeContext":"dev","namespace":"ns","registry":"registry.test"}`), 0600); err != nil {
+	if err := os.WriteFile(p, []byte(`{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"ns","registry":"registry.test"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.TTL != "8h" || c.MetadataQuery == "" || c.CookieName != "dev_branch" || c.GatewayName != "dev-cli-playground" {
+	if c.TTL != "8h" || c.MetadataQuery == "" || c.GatewayName != "dev-cli-playground" {
 		t.Fatalf("defaults missing: %#v", c)
 	}
 	if c.GatewayNamespace != "ns" || c.TaskLockNamespace != "ns" || c.InternalGateway != "http://dev-cli-gateway.ns.svc.cluster.local" || len(c.Namespaces) != 1 || len(c.PublicHosts) != 0 {
@@ -46,13 +46,13 @@ func TestDiscoverYAMLAndLegacyJSON(t *testing.T) {
 	if _, err := Load(""); err == nil {
 		t.Fatal("missing config accepted")
 	}
-	if err := os.WriteFile(".dev/config.json", []byte(`{"kubeContext":"json","namespace":"ns","registry":"registry.test"}`), 0600); err != nil {
+	if err := os.WriteFile(".dev/config.json", []byte(`{"clusterIssuer":"lab-ca-acme","kubeContext":"json","namespace":"ns","registry":"registry.test"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := Load(""); err != nil || got.KubeContext != "json" {
 		t.Fatalf("JSON fallback = %+v, %v", got, err)
 	}
-	yaml := "kubeContext: yaml\nnamespace: ns\nregistry: registry.test\nbazelArgs: [--config=agent]\n"
+	yaml := "clusterIssuer: lab-ca-acme\nkubeContext: yaml\nnamespace: ns\nregistry: registry.test\nbazelArgs: [--config=agent]\n"
 	if err := os.WriteFile(".dev/config.yaml", []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestDiscoverYAMLAndLegacyJSON(t *testing.T) {
 
 func TestDependencyAndTaskValidation(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.json")
-	valid := `{"kubeContext":"dev","namespace":"apps","namespaces":["apps","data"],"registry":"registry.test","dependencies":[{"name":"postgres","namespace":"data","manifest":"deps/postgres.json","readiness":[{"resource":"postgresql","name":"db-${DEV_ROUTE}","jsonPath":".status.PostgresClusterStatus","value":"Running"}]}],"tasks":[{"name":"migrate","namespace":"apps","manifest":"tasks/migrate.json","target":"postgres.data","dependencies":["postgres"]}]}`
+	valid := `{"clusterIssuer":"lab-ca-acme","kubeContext":"dev","namespace":"apps","namespaces":["apps","data"],"registry":"registry.test","dependencies":[{"name":"postgres","namespace":"data","manifest":"deps/postgres.json","readiness":[{"resource":"postgresql","name":"db-${DEV_ROUTE}","jsonPath":".status.PostgresClusterStatus","value":"Running"}]}],"tasks":[{"name":"migrate","namespace":"apps","manifest":"tasks/migrate.json","target":"postgres.data","dependencies":["postgres"]}]}`
 	if err := os.WriteFile(p, []byte(valid), 0600); err != nil {
 		t.Fatal(err)
 	}
