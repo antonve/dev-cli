@@ -20,7 +20,8 @@ require dev-cli v0.3.0 or newer and routes created by that version.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
   `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
   require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
-  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer. Doctor is a prerequisite check, not an
+  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer, and variables/profiles require v0.7.0
+  or newer. Doctor is a prerequisite check, not an
   end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
   or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
@@ -44,7 +45,12 @@ expansion or infer related services.
 Read declared lifecycle hooks before startup: `beforeUp` runs before explicit
 tasks and publication; `beforeStart` runs before its overlay Deployment.
 Hook failures stop startup and preserve a marker for cleanup. Hooks must be
-idempotent.
+idempotent. Check the printed `profile=` and status profile when changed paths
+select a configured profile. A live route cannot switch profiles or resolved
+variables; run down first. Variables render workload/task/dependency manifests and task targets;
+the lifecycle marker keeps resolved values for task/provision and teardown,
+even from a checkout with different defaults. Variables are plaintext data,
+not a place for credentials.
 
 Provision only explicitly requested dependencies with `dev provision <name>` or
 `dev up --dependency <name>`. `retain` dependencies deliberately survive down

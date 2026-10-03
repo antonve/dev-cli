@@ -14,13 +14,15 @@ import (
 const LifecycleLabel = "dev-cli.io/lifecycle-marker"
 
 type Lifecycle struct {
-	Owner                                   string       `json:"-"`
-	Checkout                                string       `json:"checkout,omitempty"`
-	Hooks                                   config.Hooks `json:"hooks"`
-	Deployables                             []string     `json:"deployables,omitempty"`
-	OverlaysStopped                         bool         `json:"overlaysStopped,omitempty"`
-	Branch, Revision, BaseRef, BaseRevision string       `json:"-"`
-	Expiry                                  time.Time    `json:"-"`
+	Owner                                   string            `json:"-"`
+	Checkout                                string            `json:"checkout,omitempty"`
+	Profile                                 string            `json:"profile"`
+	Variables                               map[string]string `json:"variables,omitempty"`
+	Hooks                                   config.Hooks      `json:"hooks"`
+	Deployables                             []string          `json:"deployables,omitempty"`
+	OverlaysStopped                         bool              `json:"overlaysStopped,omitempty"`
+	Branch, Revision, BaseRef, BaseRevision string            `json:"-"`
+	Expiry                                  time.Time         `json:"-"`
 }
 
 func (c Client) ReadLifecycle(ctx context.Context, route string) (*Lifecycle, error) {
@@ -51,6 +53,9 @@ func (c Client) ReadLifecycle(ctx context.Context, route string) (*Lifecycle, er
 		return nil, fmt.Errorf("invalid lifecycle hooks for route %s: %w", route, err)
 	}
 	m.Owner = owner
+	if m.Profile == "" {
+		m.Profile = "default"
+	}
 	a := object.Metadata.Annotations
 	m.Branch, m.Revision, m.BaseRef, m.BaseRevision = a["dev-cli.io/branch-original"], a["dev-cli.io/source-revision"], a["dev-cli.io/base-ref"], a["dev-cli.io/base-revision"]
 	m.Expiry, err = time.Parse(time.RFC3339, a["dev-cli.io/expires-at"])
@@ -61,6 +66,9 @@ func (c Client) ReadLifecycle(ctx context.Context, route string) (*Lifecycle, er
 }
 
 func (c Client) WriteLifecycle(ctx context.Context, m Lifecycle, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
+	if m.Profile == "" {
+		m.Profile = "default"
+	}
 	recorded := config.Hooks{AfterDown: append([]string{}, m.Hooks.AfterDown...), Deployables: map[string]config.DeployableHooks{}}
 	for name, hooks := range m.Hooks.Deployables {
 		recorded.Deployables[name] = config.DeployableHooks{AfterStop: append([]string{}, hooks.AfterStop...)}

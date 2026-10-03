@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,7 +29,7 @@ import (
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.6.0"
+const version = "v0.7.0"
 
 type common struct{ config, owner, base string }
 type stringsFlag []string
@@ -156,6 +157,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		_, _ = cleanup(ctx, k, cfg, time.Now(), false, stderr)
 		return status(ctx, k, cfg, c.owner, branch, route, local.Running(), stdout)
 	case "provision":
+		cfg, _, k, err = resolveProfileContext(ctx, g, k, cfg, route, c.base)
+		if err != nil {
+			return err
+		}
 		if f.NArg() == 0 {
 			return fmt.Errorf("usage: dev provision [flags] dependency...")
 		}
@@ -171,6 +176,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		}
 		return nil
 	case "task":
+		cfg, _, k, err = resolveProfileContext(ctx, g, k, cfg, route, c.base)
+		if err != nil {
+			return err
+		}
 		if f.NArg() != 1 {
 			return fmt.Errorf("usage: dev task [flags] name")
 		}
@@ -207,6 +216,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		if err != nil {
 			return err
 		}
+		cfg, profile := cfg.ForPaths(changed)
+		marker, err := k.ReadLifecycle(ctx, route)
+		if err != nil {
+			return err
+		}
+		if marker != nil && marker.Profile != profile {
+			return fmt.Errorf("route %s runs profile %s; run dev down first", route, marker.Profile)
+		}
+		resolvedVariables := cfg.ResolveVariables(route, cfg.Namespace)
+		if marker != nil && !maps.Equal(marker.Variables, resolvedVariables) {
+			return fmt.Errorf("route %s has different recorded variables; run dev down first", route)
+		}
+		k.Variables = resolvedVariables
 		ds, err := bz.Metadata(ctx, cfg.MetadataQuery, changed)
 		if err != nil {
 			return err
@@ -241,7 +263,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		for _, d := range ds {
 			deployableNames = append(deployableNames, d.Name)
 		}
-		if err := k.WriteLifecycle(ctx, kube.Lifecycle{Owner: c.owner, Checkout: root, Hooks: cfg.Hooks, Deployables: deployableNames}, branch, rev, c.base, merge, route, expiry); err != nil {
+		if err := k.WriteLifecycle(ctx, kube.Lifecycle{Owner: c.owner, Checkout: root, Profile: profile, Variables: k.Variables, Hooks: cfg.Hooks, Deployables: deployableNames}, branch, rev, c.base, merge, route, expiry); err != nil {
 			return err
 		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
@@ -266,7 +288,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 				return err
 			}
 		}
-		fmt.Fprintf(stdout, "branch=%s owner=%s route=%s base=%s affected=%s\n", branch, c.owner, route, merge, names(ds))
+		fmt.Fprintf(stdout, "branch=%s owner=%s route=%s profile=%s base=%s affected=%s\n", branch, c.owner, route, profile, merge, names(ds))
 		affected := make(map[string]bool, len(ds))
 		resolvedImages := make(map[string]string, len(ds))
 		for _, d := range ds {
@@ -422,12 +444,41 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 			return fmt.Errorf("deployable %s has unsafe syncStripPrefix", d.Name)
 		}
 	}
-	for name := range cfg.Hooks.Deployables {
-		if !seen[name] {
-			return fmt.Errorf("hook names unknown deployable %q", name)
+	hooks := []config.Hooks{cfg.Hooks}
+	for _, profile := range cfg.Profiles {
+		hooks = append(hooks, profile.Hooks)
+	}
+	for _, h := range hooks {
+		for name := range h.Deployables {
+			if !seen[name] {
+				return fmt.Errorf("hook names unknown deployable %q", name)
+			}
 		}
 	}
 	return nil
+}
+
+func resolveProfileContext(ctx context.Context, g gitx.Git, k kube.Client, cfg config.Config, route, base string) (config.Config, string, kube.Client, error) {
+	marker, err := k.ReadLifecycle(ctx, route)
+	if err != nil {
+		return cfg, "", k, err
+	}
+	if marker != nil {
+		effective, err := cfg.ForProfile(marker.Profile)
+		k.Variables = marker.Variables
+		return effective, marker.Profile, k, err
+	}
+	merge, err := g.MergeBase(ctx, base)
+	if err != nil {
+		return cfg, "", k, err
+	}
+	changed, err := g.Changed(ctx, merge)
+	if err != nil {
+		return cfg, "", k, err
+	}
+	effective, profile := cfg.ForPaths(changed)
+	k.Variables = effective.ResolveVariables(route, cfg.Namespace)
+	return effective, profile, k, nil
 }
 
 func runHooks(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Config, tasks []string, revision, owner, route string, w io.Writer) error {
@@ -445,6 +496,7 @@ func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, rout
 		return err
 	}
 	if marker != nil {
+		k.Variables = marker.Variables
 		if owner != marker.Owner {
 			return fmt.Errorf("route %s belongs to %s", route, marker.Owner)
 		}
@@ -779,6 +831,10 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 	marker, err := k.ReadLifecycle(ctx, route)
 	if err != nil {
 		return err
+	}
+	out["profile"] = "default"
+	if marker != nil {
+		out["profile"] = marker.Profile
 	}
 	out["teardownPending"] = marker != nil && (marker.OverlaysStopped || time.Now().After(marker.Expiry))
 	out["routingHealth"] = routingHealth

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,12 +25,30 @@ const (
 	microTimeFormat   = "2006-01-02T15:04:05.000000Z07:00"
 )
 
-func readObjects(path, route, namespace string) ([]map[string]any, error) {
+var unresolvedVariable = regexp.MustCompile(`\$\{DEV_VAR_[^}]*\}`)
+
+func substitute(value, route, namespace string, variables map[string]string) (string, error) {
+	replacements := []string{"${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace}
+	for name, value := range variables {
+		replacements = append(replacements, "${DEV_VAR_"+name+"}", value)
+	}
+	rendered := strings.NewReplacer(replacements...).Replace(value)
+	if unknown := unresolvedVariable.FindString(rendered); unknown != "" {
+		return "", fmt.Errorf("unknown variable %s", unknown)
+	}
+	return rendered, nil
+}
+
+func readObjects(path, route, namespace string, variables map[string]string) ([]map[string]any, error) {
 	b, err := readRepoFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s: %w", path, err)
 	}
-	b = []byte(strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(string(b)))
+	rendered, err := substitute(string(b), route, namespace, variables)
+	if err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", path, err)
+	}
+	b = []byte(rendered)
 	var raw map[string]any
 	if err := document.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("parse manifest %s: %w", path, err)
@@ -123,7 +142,7 @@ func (c Client) ensureManaged(ctx context.Context, kind, name, managed, owner, r
 
 func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route string) error {
 	c = c.In(d.Namespace)
-	objects, err := readObjects(d.Manifest, route, d.Namespace)
+	objects, err := readObjects(d.Manifest, route, d.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
@@ -218,7 +237,7 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 		return nil
 	}
 	c = c.In(d.Namespace)
-	objects, err := readObjects(d.Manifest, route, d.Namespace)
+	objects, err := readObjects(d.Manifest, route, d.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
@@ -432,9 +451,14 @@ func (c Client) holderJobState(ctx context.Context, holder string) (bool, bool, 
 }
 
 func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, image, revision, owner, route string) error {
+	target, err := substitute(task.Target, route, task.Namespace, c.Variables)
+	if err != nil {
+		return fmt.Errorf("task %s target: %w", task.Name, err)
+	}
+	task.Target = target
 	timeout, _ := time.ParseDuration(task.Timeout)
 	c = c.In(task.Namespace)
-	objects, err := readObjects(task.Manifest, route, task.Namespace)
+	objects, err := readObjects(task.Manifest, route, task.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}

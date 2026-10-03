@@ -27,7 +27,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	cliVersion     = "v0.6.0"
+	cliVersion     = "v0.7.0"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
 )
 
@@ -74,6 +74,7 @@ done
 type Client struct {
 	Run                execx.Runner
 	Context, Namespace string
+	Variables          map[string]string
 }
 
 func (c Client) In(namespace string) Client { c.Namespace = namespace; return c }
@@ -119,7 +120,7 @@ func mergeNamed(values []any, additions ...map[string]any) []any {
 	return values
 }
 
-func loadPodTemplate(path, route, namespace string) (map[string]any, error) {
+func loadPodTemplate(path, route, namespace string, variables map[string]string) (map[string]any, error) {
 	if path == "" {
 		return map[string]any{}, nil
 	}
@@ -127,7 +128,11 @@ func loadPodTemplate(path, route, namespace string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read workload template %s: %w", path, err)
 	}
-	b = []byte(strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(string(b)))
+	rendered, err := substitute(string(b), route, namespace, variables)
+	if err != nil {
+		return nil, fmt.Errorf("workload template %s: %w", path, err)
+	}
+	b = []byte(rendered)
 	var template map[string]any
 	if err := document.Unmarshal(b, &template); err != nil {
 		return nil, fmt.Errorf("parse workload template %s: %w", path, err)
@@ -257,7 +262,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
 		map[string]any{"name": "DEV_NAMESPACE", "value": c.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": cfg.InternalGateway},
 	}
-	template, err := loadPodTemplate(d.WorkloadTemplate, route, c.Namespace)
+	template, err := loadPodTemplate(d.WorkloadTemplate, route, c.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
