@@ -5,33 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/antonve/dev-cli/internal/document"
 )
 
 type Config struct {
-	KubeContext       string       `json:"kubeContext"`
-	Namespace         string       `json:"namespace"`
-	Registry          string       `json:"registry"`
-	IngressHost       string       `json:"ingressHost"`
-	IngressClass      string       `json:"ingressClass"`
-	GatewayName       string       `json:"gatewayName"`
-	GatewayNamespace  string       `json:"gatewayNamespace"`
-	CookieName        string       `json:"cookieName"`
-	TTL               string       `json:"ttl"`
-	MetadataQuery     string       `json:"metadataQuery"`
-	Namespaces        []string     `json:"namespaces"`
-	PublicHosts       []string     `json:"publicHosts"`
-	BazelArgs         []string     `json:"bazelArgs"`
-	Dependencies      []Dependency `json:"dependencies"`
-	Tasks             []Task       `json:"tasks"`
-	TaskLockNamespace string       `json:"taskLockNamespace"`
-	InternalGateway   string       `json:"internalGateway"`
-	Hooks             Hooks        `json:"hooks"`
+	KubeContext       string            `json:"kubeContext"`
+	Namespace         string            `json:"namespace"`
+	Registry          string            `json:"registry"`
+	IngressHost       string            `json:"ingressHost"`
+	IngressClass      string            `json:"ingressClass"`
+	GatewayName       string            `json:"gatewayName"`
+	GatewayNamespace  string            `json:"gatewayNamespace"`
+	CookieName        string            `json:"cookieName"`
+	TTL               string            `json:"ttl"`
+	MetadataQuery     string            `json:"metadataQuery"`
+	Namespaces        []string          `json:"namespaces"`
+	PublicHosts       []string          `json:"publicHosts"`
+	BazelArgs         []string          `json:"bazelArgs"`
+	Dependencies      []Dependency      `json:"dependencies"`
+	Tasks             []Task            `json:"tasks"`
+	TaskLockNamespace string            `json:"taskLockNamespace"`
+	InternalGateway   string            `json:"internalGateway"`
+	Hooks             Hooks             `json:"hooks"`
+	Variables         map[string]string `json:"variables"`
+	Profiles          []Profile         `json:"profiles"`
 }
 
 type Hooks struct {
@@ -52,6 +57,76 @@ func (h Hooks) TaskNames() []string {
 		names = append(names, hooks.AfterStop...)
 	}
 	return names
+}
+
+type Profile struct {
+	Name        string            `json:"name"`
+	WhenChanged []string          `json:"whenChanged"`
+	Variables   map[string]string `json:"variables"`
+	Hooks       Hooks             `json:"hooks"`
+}
+
+var variableName = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+func (c Config) withProfile(profile Profile) Config {
+	c.Variables = maps.Clone(c.Variables)
+	c.Hooks.Deployables = maps.Clone(c.Hooks.Deployables)
+	for name, value := range profile.Variables {
+		c.Variables[name] = value
+	}
+	if profile.Hooks.BeforeUp != nil {
+		c.Hooks.BeforeUp = profile.Hooks.BeforeUp
+	}
+	if profile.Hooks.AfterDown != nil {
+		c.Hooks.AfterDown = profile.Hooks.AfterDown
+	}
+	if len(profile.Hooks.Deployables) > 0 && c.Hooks.Deployables == nil {
+		c.Hooks.Deployables = map[string]DeployableHooks{}
+	}
+	for name, overrides := range profile.Hooks.Deployables {
+		hooks := c.Hooks.Deployables[name]
+		if overrides.BeforeStart != nil {
+			hooks.BeforeStart = overrides.BeforeStart
+		}
+		if overrides.AfterStop != nil {
+			hooks.AfterStop = overrides.AfterStop
+		}
+		c.Hooks.Deployables[name] = hooks
+	}
+	return c
+}
+
+func (c Config) ForPaths(changed []string) (Config, string) {
+	for _, profile := range c.Profiles {
+		for _, prefix := range profile.WhenChanged {
+			for _, path := range changed {
+				if strings.HasPrefix(filepath.ToSlash(path), prefix) {
+					return c.withProfile(profile), profile.Name
+				}
+			}
+		}
+	}
+	return c.withProfile(Profile{}), "default"
+}
+
+func (c Config) ForProfile(name string) (Config, error) {
+	if name == "default" {
+		return c.withProfile(Profile{}), nil
+	}
+	for _, profile := range c.Profiles {
+		if profile.Name == name {
+			return c.withProfile(profile), nil
+		}
+	}
+	return Config{}, fmt.Errorf("recorded profile %q is missing from config", name)
+}
+
+func (c Config) ResolveVariables(route, namespace string) map[string]string {
+	variables := make(map[string]string, len(c.Variables))
+	for name, value := range c.Variables {
+		variables[name] = strings.NewReplacer("${DEV_ROUTE}", route, "${DEV_NAMESPACE}", namespace).Replace(value)
+	}
+	return variables
 }
 
 type ObjectRef struct {
@@ -266,9 +341,44 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
-	for _, name := range c.Hooks.TaskNames() {
-		if _, ok := c.Task(name); !ok {
-			return Config{}, fmt.Errorf("hook names unknown task %q", name)
+	for name, value := range c.Variables {
+		if !variableName.MatchString(name) {
+			return Config{}, fmt.Errorf("invalid variable name %q", name)
+		}
+		if strings.Contains(value, "${DEV_VAR_") {
+			return Config{}, fmt.Errorf("variable %s cannot reference DEV_VAR variables", name)
+		}
+	}
+	profileNames := map[string]bool{}
+	hooks := []Hooks{c.Hooks}
+	for _, profile := range c.Profiles {
+		if profile.Name == "" || profile.Name == "default" || profileNames[profile.Name] {
+			return Config{}, fmt.Errorf("profile names must be non-empty, unique and different from default: %q", profile.Name)
+		}
+		profileNames[profile.Name] = true
+		if len(profile.WhenChanged) == 0 {
+			return Config{}, fmt.Errorf("profile %s requires whenChanged path prefixes", profile.Name)
+		}
+		for _, prefix := range profile.WhenChanged {
+			if !filepath.IsLocal(prefix) {
+				return Config{}, fmt.Errorf("profile %s whenChanged must be non-empty repository-relative prefixes", profile.Name)
+			}
+		}
+		for name, value := range profile.Variables {
+			if _, ok := c.Variables[name]; !ok {
+				return Config{}, fmt.Errorf("profile %s names undeclared variable %q", profile.Name, name)
+			}
+			if strings.Contains(value, "${DEV_VAR_") {
+				return Config{}, fmt.Errorf("profile %s variable %s cannot reference DEV_VAR variables", profile.Name, name)
+			}
+		}
+		hooks = append(hooks, profile.Hooks)
+	}
+	for _, h := range hooks {
+		for _, name := range h.TaskNames() {
+			if _, ok := c.Task(name); !ok {
+				return Config{}, fmt.Errorf("hook names unknown task %q", name)
+			}
 		}
 	}
 	return c, nil

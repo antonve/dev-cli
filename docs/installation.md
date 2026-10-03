@@ -32,8 +32,8 @@ go install github.com/antonve/dev-cli/cmd/dev@latest
 Check `command -v dev` after installing: an older binary earlier in PATH can
 hide the new one. To update an existing user-local installation deliberately,
 set `GOBIN="$HOME/.local/bin"` on that same install command. Stop your own active
-loops before upgrading; do not stop other developers' loops. v0.5.0 adds
-route-free `worker` deployables and `selectionGroup` pairing. v0.4.0 introduced
+loops before upgrading; do not stop other developers' loops. v0.7.0 adds variables and path-selected profiles; v0.6.0 adds task-backed
+lifecycle hooks and retryable teardown. v0.5.0 adds route-free `worker` deployables and `selectionGroup` pairing. v0.4.0 introduced
 YAML configuration, multi-host/namespace workflows, dependency/tasks, upstream
 diagnostic headers and cold frontend Pod-creation waiting.
 
@@ -115,8 +115,9 @@ selection. The playground uses the `dev-cli-gateway` alias.
 `workloadTemplate` is a repository-relative YAML or JSON `PodTemplateSpec`, not a
 Deployment. `devContainer` defaults to `app`. Its pod labels are discarded and
 replaced with isolated CLI labels; annotations and pod/container configuration
-are preserved. `initContainers` are rejected. Use `${DEV_ROUTE}` and
-`${DEV_NAMESPACE}` in environment-specific names or Secret references. The
+are preserved. `initContainers` are rejected. Use `${DEV_ROUTE}`,
+`${DEV_NAMESPACE}` and `${DEV_VAR_<NAME>}` in environment-specific names or
+Secret references. The
 overlay Service exposes `servicePort` (default `port`) and targets numeric
 container `port`, so templates need not call the port `http`.
 
@@ -152,12 +153,13 @@ it is the cross-owner serialization key. A task may also supply `imageName`,
 registry-neutral `pushTarget`, and `container` to publish the current checkout
 and inject its digest into the named regular or init container. Otherwise the
 Job manifest must deliberately pin the task image; its provenance is independent of the checkout annotation.
-Tasks run only when explicitly named. Repeat `--task` in the required order on
-`dev up`; any failure blocks that invocation before overlays are published or
-created. Ordinary startup never auto-seeds.
+Tasks run when explicitly named or bound to declared lifecycle hooks. Repeat
+`--task` in the required order on `dev up`; a beforeUp or explicit task failure
+blocks that invocation before overlays are published or created. Repositories
+choose whether their startup hooks seed data.
 
-Both manifest types support only `${DEV_ROUTE}` and `${DEV_NAMESPACE}` string
-substitution. They are not shell templates. Dependency resources are immutable
+Both manifest types support `${DEV_ROUTE}`, `${DEV_NAMESPACE}` and declared
+`${DEV_VAR_<NAME>}` string substitution; task targets use the same tokens. They are not shell templates. Dependency resources are immutable
 after creation; change the route/name for a new definition rather than asking
 the CLI to reconcile mutable infrastructure.
 

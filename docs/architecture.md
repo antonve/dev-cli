@@ -27,7 +27,8 @@ resources, working directory, arguments and probes—then changes the designated
 container's image/runtime fields. It replaces all pod labels with isolated
 selector labels, so a base Service cannot select an overlay. Template
 `initContainers` are rejected: migrations and seeds use declared tasks instead.
-`${DEV_ROUTE}` and `${DEV_NAMESPACE}` are the only substitutions.
+`${DEV_ROUTE}`, `${DEV_NAMESPACE}` and declared `${DEV_VAR_<NAME>}` values
+are substituted; see Profiles and variables.
 
 ## Runtime ownership
 
@@ -159,8 +160,9 @@ overlay lifecycle controller.
 task Jobs as repository-relative YAML or JSON. `dev provision` and `dev task` are
 explicit operations; `dev up --dependency ... --task ...` runs provision →
 readiness → tasks in flag order before applying an overlay. A failed task aborts
-that up invocation before workload publication or creation. Ordinary `dev up`
-does not infer or rerun migrations/seeds.
+that up invocation before overlay publication or creation. Startup runs
+repository-declared hooks; migrations/seeds run only when requested explicitly
+or by those hooks.
 
 Dependency objects must be namespaced in an allowed namespace. Server dry-run
 proves their scope; Secret and cluster-scoped objects are rejected. Atomic
@@ -245,3 +247,41 @@ resource untouched. Routes from older CLIs without a marker retain delete-only
 cleanup. Status performs no hook work, leaves expired marked routes in place,
 and reports `teardownPending` for the current route. Cleanup is command-driven;
 there is no always-running reaper.
+
+## Profiles and variables
+
+`variables` maps names matching `^[A-Z][A-Z0-9_]*$` to strings. A variable value
+may contain `${DEV_ROUTE}` and `${DEV_NAMESPACE}`; values resolve once using
+the route and routing namespace. Values cannot reference other DEV_VAR values.
+Workload templates, task Job manifests and dependency manifests substitute
+`${DEV_VAR_<NAME>}` alongside the existing direct route/namespace tokens. Direct
+`${DEV_NAMESPACE}` is the workload/task/dependency namespace. An unresolved
+DEV_VAR token is an error before that resource is mutated.
+
+`profiles` is an ordered list with a unique nonempty `name` (excluding reserved
+`default`), nonempty repository-relative `whenChanged` prefixes, optional
+variable overrides and optional hook overrides. Only top-level variables may
+be overridden. The first profile whose literal prefix matches a changed path
+wins. The changed set includes committed changes from the comparison merge
+base, uncommitted changes and unignored untracked files. Without a match, the
+profile is `default`. Profiles replace only hook keys they specify; omitted
+keys inherit, and an explicit empty array clears that event. Deployable hook
+keys in every profile must name known Bazel metadata deployables.
+
+Startup reports `profile=<name>`. The lifecycle marker stores that name and
+resolved variables; a live marker with a different profile or unequal
+resolved values makes startup fail with `run dev down first`. This preserves
+the original cleanup scope even if a later startup hook would fail. The
+refusal reports the route without exposing variable values. `dev task` and `dev provision` use a marker's profile
+and recorded values when present; otherwise they select from the changed files
+in the same way as startup. Down and expiry cleanup render recorded hook Jobs
+and removable dependency manifests with the marker's values, rather than the
+caller's configuration. Status shows the recorded profile. These values are
+plaintext ConfigMap data and must not carry credentials.
+
+A task's `target` also substitutes route, its task namespace and resolved
+variables before Lease acquisition. Every lifecycle task for a route must use
+the same stable target; a target containing `${DEV_ROUTE}` creates a Lease per
+route. This does not change terminal-Job proof, compare-and-set acquisition or
+interruption recovery. Dependency readiness names keep their existing direct
+route substitution; profiles do not add readiness-expression templating.

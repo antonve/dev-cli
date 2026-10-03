@@ -105,3 +105,36 @@ Hooks must be idempotent: reruns and failed teardown retries may repeat them.
 `dev status` skips those routes and reports `teardownPending` without running
 any hook. A checkout missing a recorded task skips that route with a warning.
 Configuration rejects unknown keys and undeclared hook task/deployable names.
+
+## Profiles and variables
+
+v0.7.0 adds variables and first-match path profiles:
+
+```yaml
+variables:
+  DATABASE: tadoku
+profiles:
+  - name: isolated-database
+    whenChanged: [services/api/migrations/]
+    variables:
+      DATABASE: tadoku-${DEV_ROUTE}
+    hooks:
+      beforeUp: [migrate, tenant]
+```
+
+Variables use uppercase names and `${DEV_VAR_DATABASE}` in workload templates,
+task Jobs and dependency manifests. Their values may contain `${DEV_ROUTE}`
+and `${DEV_NAMESPACE}`; the latter resolves to the routing namespace. Direct
+manifest `${DEV_NAMESPACE}` retains the manifest's declared namespace. Unknown
+variables fail before the corresponding resource is written. Task targets also
+expand these tokens before acquiring their Lease, so tasks can serialize one
+route by declaring a target such as `database/${DEV_ROUTE}`.
+
+Changed repository-relative path prefixes choose the first matching profile;
+otherwise the profile is `default`. A profile overrides only declared variables
+and hook keys it supplies; an explicit empty hook array disables that hook.
+Startup prints `profile=`, and status shows the recorded profile. The lifecycle
+marker records resolved variables; task/provision reuse them, and teardown uses
+them even when another checkout's values differ. A live route cannot change
+profile or resolved variables until `dev down`. Variables are plaintext
+ConfigMap data; reference Secrets in manifests for credentials.
