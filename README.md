@@ -34,8 +34,8 @@ dev down
 dev cleanup                    # remove expired dev-cli overlays
 ```
 
-`--service`, `--dependency`, and `--task` are explicit and repeatable; the CLI
-never provisions dependencies automatically. Deployables with the same
+`--service`, `--dependency`, and `--task` are explicit and repeatable.
+Dependencies run when requested directly or by a declared task or hook. Deployables with the same
 `selectionGroup` are selected together, including when one is named with
 `--service`. `dev up`
 stays in the foreground and supervises live updates. Stop it with
@@ -97,6 +97,9 @@ tasks, image publication and overlays. A deployable's `beforeStart` completes
 before its Deployment is created or replaced. Teardown waits for overlays and
 pods to stop, runs every recorded `afterStop`, then `afterDown`, removes `down`
 dependencies and task Jobs, and deletes the route's lifecycle marker last.
+Startup renews the marker while hooks and publication run. Expired cleanup
+stops the recorded local owner before hooks; discovered services are saved
+before deletion so interrupted waits do not lose their cleanup tasks.
 Hooks must be idempotent: reruns and failed teardown retries may repeat them.
 `dev cleanup` and startup run expired routes' recorded teardown hooks;
 `dev status` skips those routes and reports `teardownPending` without running

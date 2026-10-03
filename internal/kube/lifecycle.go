@@ -15,6 +15,7 @@ const LifecycleLabel = "dev-cli.io/lifecycle-marker"
 
 type Lifecycle struct {
 	Owner                                   string       `json:"-"`
+	Checkout                                string       `json:"checkout,omitempty"`
 	Hooks                                   config.Hooks `json:"hooks"`
 	Deployables                             []string     `json:"deployables,omitempty"`
 	OverlaysStopped                         bool         `json:"overlaysStopped,omitempty"`

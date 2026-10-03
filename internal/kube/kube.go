@@ -236,7 +236,7 @@ func annotations(owner, branch, revision, baseRef, baseRevision, image string, e
 		"dev-cli.io/source-revision": revision, "dev-cli.io/base-ref": baseRef,
 		"dev-cli.io/base-revision": baseRevision, "dev-cli.io/image": image,
 		"dev-cli.io/created-at": created, "dev-cli.io/last-sync-at": time.Now().UTC().Format(time.RFC3339),
-		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339), "dev-cli.io/cli-version": cliVersion,
+		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339Nano), "dev-cli.io/cli-version": cliVersion,
 	}
 }
 
@@ -790,7 +790,7 @@ func (c Client) RecordSync(ctx context.Context, route, service string, syncErr e
 }
 
 func (c Client) Heartbeat(ctx context.Context, route string, ttl time.Duration) error {
-	_, err := c.RunKubectl(ctx, []string{"annotate", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339)}, nil)
+	_, err := c.RunKubectl(ctx, []string{"annotate", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339Nano)}, nil)
 	return err
 }
 func (c Client) Logs(ctx context.Context, route, service, container string, stdout, stderr io.Writer) error {

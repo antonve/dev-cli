@@ -223,18 +223,24 @@ subsequent workload write; a failed `beforeUp` prevents image publication too.
 The marker exists before the first hook, so a failed start remains cleanable.
 
 The marker records teardown task names, the original owner and selected
-services. Normal heartbeat renewal includes this ConfigMap. `dev down` stops
-its local loop, lists owned Deployments, deletes overlays with foreground
-propagation, waits for each service's pods to disappear, and records that
-stopping has completed. It runs the recorded service `afterStop` tasks, then
+services. Heartbeat renewal begins after the marker is written and continues during
+startup hooks, image publication and live sync; it includes this ConfigMap.
+The marker also records its checkout for exact local-owner shutdown during
+cleanup. Startup expiry maintenance protects its newly acquired local socket
+while tearing down a prior expired marker for the same checkout/route.
+`dev down` stops its local loop, lists owned Deployments and persists the
+discovered service names before deleting overlays with foreground propagation.
+It waits for each service's pods to disappear and records that stopping has
+completed. It runs the recorded service `afterStop` tasks, then
 `afterDown`, removes dependencies with `retention: down`, deletes task Jobs,
 and deletes the marker last. A failed wait or hook leaves the marker. A retry
 after stopping has completed runs the hooks without another overlay deletion.
 All hooks must be idempotent because any hook can run more than once.
 
 Cleanup groups resource expiries across all configured namespaces and uses the
-latest expiry for a route. Expired marked routes use the same teardown and
-original owner. Missing recorded tasks produce a warning and leave every
+latest expiry for a route. Expired marked routes stop the recorded local owner,
+then use the same teardown and original owner. Missing recorded tasks produce
+a warning and leave every
 resource untouched. Routes from older CLIs without a marker retain delete-only
 cleanup. Status performs no hook work, leaves expired marked routes in place,
 and reports `teardownPending` for the current route. Cleanup is command-driven;
