@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antonve/dev-cli/internal/deeplink"
 	"github.com/antonve/dev-cli/internal/document"
 )
 
@@ -22,6 +23,7 @@ type Config struct {
 	Registry          string            `json:"registry"`
 	IngressHost       string            `json:"ingressHost"`
 	IngressClass      string            `json:"ingressClass"`
+	ClusterIssuer     string            `json:"clusterIssuer"`
 	GatewayName       string            `json:"gatewayName"`
 	GatewayNamespace  string            `json:"gatewayNamespace"`
 	CookieName        string            `json:"cookieName"`
@@ -272,6 +274,13 @@ func Load(path string) (Config, error) {
 	}
 	if c.IngressHost != "" && len(c.PublicHosts) == 0 {
 		c.PublicHosts = []string{c.IngressHost}
+	}
+	if c.ClusterIssuer != "" {
+		for _, host := range c.PublicHosts {
+			if _, err := deeplink.HostURL(host, strings.Repeat("a", 47), "/"); err != nil {
+				return Config{}, fmt.Errorf("public host %q must be a DNS hostname with room for a 47-character branch label", host)
+			}
+		}
 	}
 	for i := range c.Dependencies {
 		d := &c.Dependencies[i]

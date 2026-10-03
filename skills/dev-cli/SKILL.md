@@ -80,6 +80,12 @@ sync and is not live development.
 
 ## Give the user a clickable link
 
+With `clusterIssuer`, v0.8.0 prints branch-host links that require no selection
+cookie. Open these directly; each branch is its own origin. `dev url --cookie`
+and `--clear` retain the base-host cookie fallback described below. Verify TLS
+readiness and owned Ingress/Certificate/Secret removal on down; cert-manager
+must enable certificate owner references for Secret cleanup.
+
 Return the actual **Open environment** URL printed after startup, or run:
 
 ```sh

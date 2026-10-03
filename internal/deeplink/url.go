@@ -3,12 +3,36 @@ package deeplink
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
 const Parameter = "dev-branch"
 const Base = "base"
+
+var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func HostURL(host, route, destination string) (string, error) {
+	if !dnsLabel.MatchString(route) || net.ParseIP(host) != nil || len(host)+len(route)+1 > 253 {
+		return "", fmt.Errorf("invalid branch host")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !dnsLabel.MatchString(label) {
+			return "", fmt.Errorf("invalid public host %q", host)
+		}
+	}
+	link, err := URL(route+"."+host, destination, route)
+	if err != nil {
+		return "", err
+	}
+	u, _ := url.Parse(link)
+	query := u.Query()
+	query.Del(Parameter)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
 
 // URL accepts only a root-relative destination on the configured application
 // host. It replaces selection parameters and preserves other query values and

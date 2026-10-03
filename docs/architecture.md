@@ -77,6 +77,18 @@ in its workload template.
 
 ## Routing ownership
 
+With `clusterIssuer`, the CLI owns one host-only HTTPRoute per public deployable
+and one Ingress covering every `<route>.<publicHost>`. Host routes set the
+trusted branch header and use the same proxy or active/base backend references
+as cookie routes. Health policies include direct host routes. The Ingress
+forwards to the routing namespace's `dev-cli-gateway` Service and requests TLS
+through cert-manager. Down/expiry remove the owned Ingress. cert-manager must
+run with `--enable-certificate-owner-ref=true`, so deleting the Ingress removes
+its Certificate and Secret. Startup waits for certificate creation and readiness
+within one 120-second deadline, then warns on failure while the cookie fallback
+remains available. Doctor checks the
+issuer, gateway Service and Ingress/certificate permissions.
+
 Browser selection uses [gateway-owned deep links](deep-links.md): `dev up` and
 `dev status` expose URLs, while `dev url` preserves a supplied deep destination.
 GET/HEAD query matches override old cookies and set/clear the cookie at Envoy.
