@@ -20,7 +20,7 @@ require dev-cli v0.3.0 or newer and routes created by that version.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
   `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
   require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
-  pairing require v0.5.0 or newer. Doctor is a prerequisite check, not an
+  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer. Doctor is a prerequisite check, not an
   end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
   or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
@@ -40,6 +40,11 @@ and Bazel reverse dependencies to select services once at startup. Unknown files
 conservatively select all deployables. If adding another service later, stop and
 rerun the loop with repeatable `--service <name>`; do not claim automatic
 expansion or infer related services.
+
+Read declared lifecycle hooks before startup: `beforeUp` runs before explicit
+tasks and publication; `beforeStart` runs before its overlay Deployment.
+Hook failures stop startup and preserve a marker for cleanup. Hooks must be
+idempotent.
 
 Provision only explicitly requested dependencies with `dev provision <name>` or
 `dev up --dependency <name>`. `retain` dependencies deliberately survive down
@@ -123,6 +128,12 @@ loop and remove only that environment. Ctrl-C alone leaves Kubernetes resources.
 
 `dev cleanup` is broader: it removes expired CLI-owned environments across owners
 in configured namespaces, but never retained dependency data. Up/status also
-perform expiry maintenance. Do not
+perform expiry maintenance; status skips marked routes, reports
+`teardownPending`, and never runs hooks. Down/cleanup wait for stopped pods,
+run recorded `afterStop` and `afterDown` tasks with the recorded owner, then
+remove dependencies and task Jobs and delete the lifecycle marker last. A
+failed hook retains the marker for retry. Missing recorded tasks skip the
+route with a warning. Inspect the hook Job logs, fix the cause, and rerun
+down/cleanup; never delete a lifecycle marker by hand. Do not
 use cleanup to delete another active environment or imply that expiry has an
 always-running reaper. Never delete base/Argo resources or unrelated resources.

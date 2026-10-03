@@ -77,3 +77,28 @@ The portable [dev-cli skill](skills/dev-cli/SKILL.md) teaches agents the actual
 startup, live-edit, deep-link, verification and cleanup workflow. Install that
 folder into your agent's skills directory (for Codex, `$CODEX_HOME/skills` or
 `~/.codex/skills`). It does not grant cluster or registry permissions.
+
+## Lifecycle hooks
+
+Repositories may bind declared tasks to startup and teardown:
+
+```yaml
+hooks:
+  beforeUp: [tenant]
+  afterDown: [tenant-teardown]
+  deployables:
+    worker:
+      beforeStart: [worker-override-set]
+      afterStop: [worker-override-clear]
+```
+
+Hooks require v0.6.0 or newer. `beforeUp` completes before explicit `--task`
+tasks, image publication and overlays. A deployable's `beforeStart` completes
+before its Deployment is created or replaced. Teardown waits for overlays and
+pods to stop, runs every recorded `afterStop`, then `afterDown`, removes `down`
+dependencies and task Jobs, and deletes the route's lifecycle marker last.
+Hooks must be idempotent: reruns and failed teardown retries may repeat them.
+`dev cleanup` and startup run expired routes' recorded teardown hooks;
+`dev status` skips those routes and reports `teardownPending` without running
+any hook. A checkout missing a recorded task skips that route with a warning.
+Configuration rejects unknown keys and undeclared hook task/deployable names.

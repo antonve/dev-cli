@@ -189,8 +189,8 @@ The foreground `dev up` process owns local watching. `dev down` removes only
 objects matching both current owner and route labels, including the Backend and
 BackendTrafficPolicy resources. Expiry cleanup scans all owned resource kinds,
 so orphan routing objects remain cleanable after their Deployment disappears.
-Expiry cleanup runs on
-up/status or through `dev cleanup`.
+Expiry maintenance runs on startup/status or through `dev cleanup`; status
+never runs lifecycle hooks and leaves marked routes pending teardown.
 While the local watcher runs it renews expiry every 30 seconds (or one third
 of a shorter configured TTL). After it stops, the last renewed expiry remains
 the cleanup deadline.
@@ -204,3 +204,38 @@ reclaims the stale socket. Stop older CLI versions before upgrading: legacy
 PID files are intentionally not used to control unknown processes. Different
 checkouts on different machines must use different owner identities if their
 loops are to operate independently.
+
+## Lifecycle hooks
+
+`hooks.beforeUp` and `hooks.afterDown` name ordered lists of declared tasks.
+`hooks.deployables.<name>.beforeStart` and `afterStop` bind tasks to a Bazel
+metadata deployable. Unknown tasks, deployables and configuration fields fail
+before startup. Hook Jobs use the same publication, task target Lease, timeout,
+namespace and ownership boundaries as `dev task`.
+
+Startup first cleans up expired routes and selects deployables. With no
+selection it exits without hooks. Otherwise it writes a labelled lifecycle
+ConfigMap in the routing namespace, provisions explicit dependencies, runs
+`beforeUp`, then explicit tasks, publishes images, and runs each deployable's
+`beforeStart` immediately before creating or replacing its overlay. Routing,
+initial synchronization and the watch loop follow. A failed hook prevents its
+subsequent workload write; a failed `beforeUp` prevents image publication too.
+The marker exists before the first hook, so a failed start remains cleanable.
+
+The marker records teardown task names, the original owner and selected
+services. Normal heartbeat renewal includes this ConfigMap. `dev down` stops
+its local loop, lists owned Deployments, deletes overlays with foreground
+propagation, waits for each service's pods to disappear, and records that
+stopping has completed. It runs the recorded service `afterStop` tasks, then
+`afterDown`, removes dependencies with `retention: down`, deletes task Jobs,
+and deletes the marker last. A failed wait or hook leaves the marker. A retry
+after stopping has completed runs the hooks without another overlay deletion.
+All hooks must be idempotent because any hook can run more than once.
+
+Cleanup groups resource expiries across all configured namespaces and uses the
+latest expiry for a route. Expired marked routes use the same teardown and
+original owner. Missing recorded tasks produce a warning and leave every
+resource untouched. Routes from older CLIs without a marker retain delete-only
+cleanup. Status performs no hook work, leaves expired marked routes in place,
+and reports `teardownPending` for the current route. Cleanup is command-driven;
+there is no always-running reaper.

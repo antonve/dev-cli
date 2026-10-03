@@ -37,3 +37,10 @@
   ```
 - For operator resources without standard conditions, use `jsonPath` and
   `value` readiness (for example PostgresClusterStatus = Running).
+- If teardown is stuck, inspect the failing hook Job logs printed by the error.
+  Fix its cause and rerun `dev down` or `dev cleanup` from a checkout declaring
+  the recorded tasks. The lifecycle marker preserves the retry contract; never
+  delete it by hand. After overlays stop, hook retries do not recreate them.
+- `teardownPending` means status left an expired or partially stopped lifecycle
+  in place. Status never runs hook Jobs. Run `dev down` or `dev cleanup` to
+  finish it; missing task warnings identify the checkout contract needed.

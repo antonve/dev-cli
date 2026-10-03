@@ -174,6 +174,9 @@ func (r statusRunner) Run(_ context.Context, _ string, args []string, _ io.Reade
 	if strings.Contains(strings.Join(args, " "), "get deployments") {
 		return []byte(`{"items":[{"metadata":{"name":"worker-route","labels":{"dev-cli.io/service":"jobs"},"annotations":{"dev-cli.io/kind":"` + r.kind + `","dev-cli.io/sync-health":"healthy"}},"status":{"readyReplicas":1}}]}`), nil
 	}
+	if strings.Contains(strings.Join(args, " "), "get configmap") {
+		return nil, nil
+	}
 	return []byte(`{"items":[]}`), nil
 }
 

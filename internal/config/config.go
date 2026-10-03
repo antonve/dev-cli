@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,6 +31,27 @@ type Config struct {
 	Tasks             []Task       `json:"tasks"`
 	TaskLockNamespace string       `json:"taskLockNamespace"`
 	InternalGateway   string       `json:"internalGateway"`
+	Hooks             Hooks        `json:"hooks"`
+}
+
+type Hooks struct {
+	BeforeUp    []string                   `json:"beforeUp,omitempty"`
+	AfterDown   []string                   `json:"afterDown,omitempty"`
+	Deployables map[string]DeployableHooks `json:"deployables,omitempty"`
+}
+
+type DeployableHooks struct {
+	BeforeStart []string `json:"beforeStart,omitempty"`
+	AfterStop   []string `json:"afterStop,omitempty"`
+}
+
+func (h Hooks) TaskNames() []string {
+	names := append(append([]string{}, h.BeforeUp...), h.AfterDown...)
+	for _, hooks := range h.Deployables {
+		names = append(names, hooks.BeforeStart...)
+		names = append(names, hooks.AfterStop...)
+	}
+	return names
 }
 
 type ObjectRef struct {
@@ -110,8 +133,18 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
+	var raw map[string]any
+	if err := document.Unmarshal(b, &raw); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	converted, err := json.Marshal(raw)
+	if err != nil {
+		return Config{}, err
+	}
 	var c Config
-	if err := document.Unmarshal(b, &c); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(converted))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	if c.KubeContext == "" || c.Namespace == "" || c.Registry == "" {
@@ -231,6 +264,11 @@ func Load(path string) (Config, error) {
 			if _, ok := c.Dependency(name); !ok {
 				return Config{}, fmt.Errorf("task %q has unknown dependency %q", task.Name, name)
 			}
+		}
+	}
+	for _, name := range c.Hooks.TaskNames() {
+		if _, ok := c.Task(name); !ok {
+			return Config{}, fmt.Errorf("hook names unknown task %q", name)
 		}
 	}
 	return c, nil
