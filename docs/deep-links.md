@@ -1,4 +1,18 @@
-# Gateway-owned deep links (v0.3.0)
+# Gateway-owned branch links
+
+With `clusterIssuer: lab-ca-acme` configured, v0.8.0 defaults to
+`https://<route>.<publicHost>/`. Each branch is an independent browser origin;
+no selection cookie is needed. Paths, query parameters and fragments are
+preserved, and existing `dev-branch` parameters are removed.
+`dev url --cookie` emits the legacy base-host selection link;
+`dev url --clear` still clears its cookie. Without an issuer, existing links
+are unchanged. Status puts host links in `url`/`urls` and legacy links in
+`cookieURL`/`cookieURLs`.
+
+Public hosts must be DNS hostnames with room for the 47-character route label.
+TLS requires trusted cluster-issued certificates. A missing certificate warns
+at startup and reports the exact describe command; cookie fallback remains
+available. The paths below describe that legacy fallback.
 
 ```sh
 dev up --owner alice

@@ -1,5 +1,12 @@
 # Operations and troubleshooting
 
+- A branch-host 404 means that environment has no running host route. Use
+  the current printed URL and inspect `dev status`.
+- If branch TLS is not ready, run the exact certificate describe command
+  printed by startup. Check issuer readiness, DNS and HTTP-01 routing. Cookie
+  links remain available with `dev url --cookie`. Certificate and Secret cleanup
+  requires cert-manager's `--enable-certificate-owner-ref=true` setting.
+
 - Run `dev doctor` first. It is read-only and checks Git/Bazel, the exact kube
   context, namespace RBAC, ingress class, Gateway API object and route RBAC,
   and registry endpoint.

@@ -27,8 +27,8 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	cliVersion     = "v0.7.0"
-	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
+	CLIVersion     = "v0.8.0"
+	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io,ingresses.networking.k8s.io"
 )
 
 // Runtime tooling belongs to the CLI. Backend repositories provide only an
@@ -241,7 +241,7 @@ func annotations(owner, branch, revision, baseRef, baseRevision, image string, e
 		"dev-cli.io/source-revision": revision, "dev-cli.io/base-ref": baseRef,
 		"dev-cli.io/base-revision": baseRevision, "dev-cli.io/image": image,
 		"dev-cli.io/created-at": created, "dev-cli.io/last-sync-at": time.Now().UTC().Format(time.RFC3339),
-		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339Nano), "dev-cli.io/cli-version": cliVersion,
+		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339Nano), "dev-cli.io/cli-version": CLIVersion,
 	}
 }
 
@@ -364,7 +364,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 			podAnnotations = stringMap(original)
 		}
 	}
-	podAnnotations["dev-cli.io/branch-original"], podAnnotations["dev-cli.io/source-revision"], podAnnotations["dev-cli.io/cli-version"] = branch, revision, cliVersion
+	podAnnotations["dev-cli.io/branch-original"], podAnnotations["dev-cli.io/source-revision"], podAnnotations["dev-cli.io/cli-version"] = branch, revision, CLIVersion
 	deploy := map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -431,6 +431,9 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		}
 		if d.PublicPath != "" && d.Proxy(cfg).Name == "" {
 			directRoutes = append(directRoutes, publicRouteName)
+			if cfg.ClusterIssuer != "" {
+				directRoutes = append(directRoutes, naming.Resource("route-host-"+d.Name, route))
+			}
 		}
 		if affected[d.Name] {
 			failover, refs := c.failoverResources(cfg, d, directRoutes, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
@@ -456,10 +459,33 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			// shared mutable CLI resource and down/TTL remain owner-scoped.
 			rules = append(rules, selectionRule(cfg, d, deeplink.Base, 0, publicBaseRefs))
 			items = append(items, routeObject(cfg, d, publicRouteName, []any{d.Host(cfg)}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			if cfg.ClusterIssuer != "" {
+				hostRule := map[string]any{
+					"matches":     []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}}},
+					"filters":     filters,
+					"backendRefs": publicRefs,
+				}
+				items = append(items, routeObject(cfg, d, naming.Resource("route-host-"+d.Name, route), []any{route + "." + d.Host(cfg)}, []any{hostRule}, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			}
 		}
 	}
 	if len(items) == 0 {
 		return nil
+	}
+	if cfg.ClusterIssuer != "" && len(cfg.PublicHosts) > 0 {
+		hosts, rules := []any{}, []any{}
+		for _, host := range cfg.PublicHosts {
+			host = route + "." + host
+			hosts = append(hosts, host)
+			rules = append(rules, map[string]any{"host": host, "http": map[string]any{"paths": []any{map[string]any{"path": "/", "pathType": "Prefix", "backend": map[string]any{"service": map[string]any{"name": "dev-cli-gateway", "port": map[string]any{"number": 80}}}}}}})
+		}
+		meta := map[string]any{"name": naming.Resource("hosts", route), "labels": labels(owner, route, "hosts"), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}
+		ann := meta["annotations"].(map[string]any)
+		ann["cert-manager.io/cluster-issuer"] = cfg.ClusterIssuer
+		ann["nginx.ingress.kubernetes.io/ssl-redirect"] = "true"
+		ann["nginx.ingress.kubernetes.io/proxy-read-timeout"] = "3600"
+		ann["nginx.ingress.kubernetes.io/proxy-send-timeout"] = "3600"
+		items = append(items, map[string]any{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": meta, "spec": map[string]any{"ingressClassName": cfg.IngressClass, "tls": []any{map[string]any{"hosts": hosts, "secretName": naming.Resource("tls", route)}}, "rules": rules}})
 	}
 	return c.writeOwnedObjects(ctx, items, owner, route)
 }
@@ -893,6 +919,17 @@ func (v ObjectList) RoutesReady() bool {
 		}
 	}
 	return true
+}
+
+func (c Client) WaitCertificate(ctx context.Context, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	for _, condition := range []string{"create", "condition=Ready"} {
+		if _, err := c.RunKubectl(ctx, []string{"wait", "certificate/" + name, "--for=" + condition, "--timeout=120s"}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c Client) WaitRoutes(ctx context.Context, route string) error {

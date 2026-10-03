@@ -29,7 +29,7 @@ import (
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.7.0"
+const version = kube.CLIVersion
 
 type common struct{ config, owner, base string }
 type stringsFlag []string
@@ -79,10 +79,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 	f, c := flags(args[0])
 	noWatch := false
 	clearSelection := false
+	cookieSelection := false
 	urlHost := ""
 	var selectedServices, selectedDependencies, selectedTasks stringsFlag
 	if args[0] == "url" {
 		f.BoolVar(&clearSelection, "clear", false, "link to base and clear the branch cookie")
+		f.BoolVar(&cookieSelection, "cookie", false, "use a base-host cookie selection link")
 		f.StringVar(&urlHost, "host", "", "configured public host")
 	}
 	if args[0] == "up" {
@@ -125,6 +127,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			return fmt.Errorf("host %q is not in publicHosts", urlHost)
 		}
 		link, err := deeplink.URL(urlHost, f.Arg(0), selection)
+		if cfg.ClusterIssuer != "" && !clearSelection && !cookieSelection {
+			link, err = deeplink.HostURL(urlHost, route, f.Arg(0))
+		}
 		if err != nil {
 			return err
 		}
@@ -324,6 +329,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			if err := k.WaitRoutes(ctx, route); err != nil {
 				return err
 			}
+			if cfg.ClusterIssuer != "" {
+				name := naming.Resource("tls", route)
+				if err := k.WaitCertificate(ctx, name); err != nil {
+					fmt.Fprintf(stderr, "warning: branch certificate not ready; inspect kubectl --context %s -n %s describe certificate %s; cookie links remain available: %v\n", cfg.KubeContext, cfg.Namespace, name, err)
+				}
+			}
 		}
 		for _, d := range ds {
 			if err := loop.Initial(ctx, d); err != nil {
@@ -340,6 +351,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			}
 		}
 		if cfg.IngressHost != "" {
+			if cfg.ClusterIssuer != "" {
+				for _, host := range cfg.PublicHosts {
+					link, _ := deeplink.HostURL(host, route, "/")
+					fmt.Fprintf(stdout, "Open branch host (%s): %s\n", host, link)
+				}
+				fmt.Fprintln(stdout, "Cookie fallback links:")
+			}
 			fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
 		}
 		for _, host := range cfg.PublicHosts {
@@ -762,6 +780,19 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 		}
 		fmt.Fprintln(w, "ok", x.name)
 	}
+	if c.ClusterIssuer != "" {
+		for _, args := range [][]string{
+			{"auth", "can-i", "create", "ingresses.networking.k8s.io", "--namespace", c.Namespace},
+			{"auth", "can-i", "get", "certificates.cert-manager.io", "--namespace", c.Namespace},
+			{"get", "service", "dev-cli-gateway", "--namespace", c.Namespace},
+			{"get", "clusterissuer", c.ClusterIssuer},
+		} {
+			if _, err := r.Run(ctx, "kubectl", append([]string{"--context", c.KubeContext}, args...), nil); err != nil {
+				return fmt.Errorf("doctor branch hosts: %w", err)
+			}
+		}
+		fmt.Fprintln(w, "ok branch hosts")
+	}
 	for _, namespace := range c.Namespaces {
 		for _, resource := range []string{"deployments", "services", "jobs.batch", "leases.coordination.k8s.io"} {
 			if _, err := r.Run(ctx, "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", resource, "--namespace", namespace}, nil); err != nil {
@@ -846,6 +877,15 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 	out["url"], _ = deeplink.URL(cfg.IngressHost, "/", route)
 	out["baseURL"], _ = deeplink.URL(cfg.IngressHost, "/", deeplink.Base)
 	out["urls"], out["baseURLs"] = urls, baseURLs
+	if cfg.ClusterIssuer != "" {
+		out["cookieURL"], out["cookieURLs"] = out["url"], urls
+		hostURLs := map[string]string{}
+		for _, host := range cfg.PublicHosts {
+			hostURLs[host], _ = deeplink.HostURL(host, route, "/")
+		}
+		out["url"], _ = deeplink.HostURL(cfg.IngressHost, route, "/")
+		out["urls"] = hostURLs
+	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(w, string(b))
 	return nil
