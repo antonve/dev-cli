@@ -19,12 +19,13 @@ import (
 )
 
 type Loop struct {
-	Bazel       bazel.Bazel
-	Kube        kube.Client
-	Config      config.Config
-	Root, Route string
-	TTL         time.Duration
-	KnownFiles  map[string]map[string]bool
+	Bazel           bazel.Bazel
+	Kube            kube.Client
+	Config          config.Config
+	Root, Route     string
+	TTL             time.Duration
+	KnownFiles      map[string]map[string]bool
+	HeartbeatErrors <-chan string
 }
 
 func (l Loop) podRuntime(ctx context.Context, d config.Deployable) (string, string, error) {
@@ -171,7 +172,53 @@ func (l Loop) syncBackend(ctx context.Context, d config.Deployable) error {
 	}
 	return k.SyncBinary(ctx, p, d.Container(), out, d.Name, healthURL)
 }
+func (l Loop) StartHeartbeat(ctx context.Context, ds []config.Deployable) (func(), <-chan string) {
+	ttl := l.TTL
+	if ttl <= 0 {
+		ttl = 8 * time.Hour
+	}
+	heartbeatNamespaces := map[string]bool{l.Config.Namespace: true}
+	for _, d := range ds {
+		heartbeatNamespaces[d.WorkloadNamespace(l.Config)] = true
+	}
+	// Cluster bookkeeping must not delay file sync, nor stop renewing TTLs
+	// while a build is running. Join it before acknowledging local shutdown.
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	heartbeatErrors := make(chan string, len(heartbeatNamespaces))
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(min(30*time.Second, ttl/3))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				for namespace := range heartbeatNamespaces {
+					if heartbeatCtx.Err() != nil {
+						return
+					}
+					if err := l.Kube.In(namespace).Heartbeat(heartbeatCtx, l.Route, ttl); err != nil {
+						select {
+						case heartbeatErrors <- "heartbeat: " + err.Error():
+						default:
+						}
+					}
+				}
+			}
+		}
+	}()
+	return func() { stopHeartbeat(); <-heartbeatDone }, heartbeatErrors
+}
+
 func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(string)) error {
+	heartbeatErrors := l.HeartbeatErrors
+	if heartbeatErrors == nil {
+		stop, messages := l.StartHeartbeat(ctx, ds)
+		defer stop()
+		heartbeatErrors = messages
+	}
 	type state struct {
 		d                config.Deployable
 		hash             string
@@ -206,47 +253,6 @@ func (l Loop) Watch(ctx context.Context, ds []config.Deployable, report func(str
 	}
 	t := time.NewTicker(300 * time.Millisecond)
 	defer t.Stop()
-	ttl := l.TTL
-	if ttl <= 0 {
-		ttl = 8 * time.Hour
-	}
-	heartbeatNamespaces := map[string]bool{l.Config.Namespace: true}
-	for _, state := range states {
-		heartbeatNamespaces[state.d.WorkloadNamespace(l.Config)] = true
-	}
-	// Cluster bookkeeping must not delay file sync, nor stop renewing TTLs
-	// while a build is running. Join it before acknowledging local shutdown.
-	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := make(chan struct{})
-	heartbeatErrors := make(chan string, len(heartbeatNamespaces))
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(min(30*time.Second, max(ttl/3, time.Second)))
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatCtx.Done():
-				return
-			case <-ticker.C:
-				for namespace := range heartbeatNamespaces {
-					if heartbeatCtx.Err() != nil {
-						return
-					}
-					if err := l.Kube.In(namespace).Heartbeat(heartbeatCtx, l.Route, ttl); err != nil {
-						select {
-						case heartbeatErrors <- "heartbeat: " + err.Error():
-						case <-heartbeatCtx.Done():
-							return
-						}
-					}
-				}
-			}
-		}
-	}()
-	defer func() {
-		stopHeartbeat()
-		<-heartbeatDone
-	}()
 	for {
 		select {
 		case <-ctx.Done():

@@ -535,11 +535,12 @@ func TestCleanupIncludesOrphanRoutesAndKeepsRenewedGroups(t *testing.T) {
 		{"kind":"Backend","metadata":{"labels":{},"annotations":{"dev-cli.io/expires-at":"2026-01-01T00:00:00Z"}}}
 	]}`}
 	c := Client{Run: r, Context: "dev", Namespace: "ns"}
-	n, err := c.Cleanup(context.Background(), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
-	if err != nil || n != 1 || len(r.deleted) != 1 {
-		t.Fatalf("removed=%d deletes=%v err=%v", n, r.deleted, err)
+	expiries, err := c.Cleanup(context.Background(), time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(expiries) != 2 || len(r.deleted) != 0 {
+		t.Fatalf("expiries=%v deletes=%v err=%v", expiries, r.deleted, err)
 	}
-	if !strings.Contains(r.deleted[0], ManagedLabel+"=dev-cli,"+RouteLabel+"=orphan") || !strings.Contains(r.deleted[0], ownedResources) {
-		t.Fatalf("unsafe or incomplete cleanup: %s", r.deleted[0])
+	if !expiries["orphan"].Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) || !expiries["active"].Equal(time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("incorrect latest expiries: %v", expiries)
 	}
+
 }

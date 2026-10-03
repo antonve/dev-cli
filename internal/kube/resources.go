@@ -453,6 +453,7 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 		annotations = map[string]any{}
 	}
 	annotations["dev-cli.io/source-revision"] = revision
+	annotations["dev-cli.io/owner-original"] = owner
 	metadata["annotations"] = annotations
 	if image != "" {
 		spec, _ := objects[0]["spec"].(map[string]any)

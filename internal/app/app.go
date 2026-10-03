@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,7 +28,7 @@ import (
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
-const version = "v0.5.1"
+const version = "v0.6.0"
 
 type common struct{ config, owner, base string }
 type stringsFlag []string
@@ -54,6 +55,10 @@ func usage(w io.Writer) {
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return run(ctx, args, stdout, stderr, execx.OS{})
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.Runner) error {
 	if len(args) == 0 {
 		usage(stderr)
 		return errors.New("command required")
@@ -62,7 +67,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	r := execx.OS{}
 	g := gitx.Git{Run: r}
 	root, err := g.Root(ctx)
 	if err != nil {
@@ -133,7 +137,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "doctor":
 		return doctor(ctx, r, cfg, c.base, stdout)
 	case "cleanup":
-		n, err := cleanup(ctx, k, cfg, time.Now())
+		n, err := cleanup(ctx, k, cfg, time.Now(), true, stderr)
 		fmt.Fprintf(stdout, "removed %d expired route(s)\n", n)
 		return err
 	case "down":
@@ -141,22 +145,15 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("stop local loop: %w", err)
 		}
-		for _, namespace := range cfg.Namespaces {
-			if err := k.In(namespace).Down(ctx, c.owner, route); err != nil {
-				return err
-			}
-		}
-		for _, dependency := range cfg.Dependencies {
-			if err := k.RemoveDependency(ctx, dependency, c.owner, route); err != nil {
-				return err
-			}
+		if err := teardown(ctx, k, cfg, c.owner, route, stdout); err != nil {
+			return err
 		}
 		fmt.Fprintf(stdout, "removed route %s local-loop-stopped=%t\n", route, stopped)
 		return nil
 	case "logs":
 		return logs(ctx, k, cfg, route, service, stdout, stderr)
 	case "status":
-		_, _ = cleanup(ctx, k, cfg, time.Now())
+		_, _ = cleanup(ctx, k, cfg, time.Now(), false, stderr)
 		return status(ctx, k, cfg, c.owner, branch, route, local.Running(), stdout)
 	case "provision":
 		if f.NArg() == 0 {
@@ -199,7 +196,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		defer release()
 		ctx = upCtx
-		_, _ = cleanup(ctx, k, cfg, time.Now())
+		if _, err := cleanup(ctx, k, cfg, time.Now(), true, stderr, route); err != nil {
+			return err
+		}
 		merge, err := g.MergeBase(ctx, c.base)
 		if err != nil {
 			return err
@@ -233,6 +232,22 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		ttl, err := time.ParseDuration(cfg.TTL)
+		if err != nil {
+			return fmt.Errorf("ttl: %w", err)
+		}
+		expiry := time.Now().Add(ttl)
+		deployableNames := make([]string, 0, len(ds))
+		for _, d := range ds {
+			deployableNames = append(deployableNames, d.Name)
+		}
+		if err := k.WriteLifecycle(ctx, kube.Lifecycle{Owner: c.owner, Checkout: root, Hooks: cfg.Hooks, Deployables: deployableNames}, branch, rev, c.base, merge, route, expiry); err != nil {
+			return err
+		}
+		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
+		stopHeartbeat, heartbeatErrors := loop.StartHeartbeat(ctx, ds)
+		defer stopHeartbeat()
+		loop.HeartbeatErrors = heartbeatErrors
 		for _, name := range selectedDependencies {
 			d, ok := cfg.Dependency(name)
 			if !ok {
@@ -243,16 +258,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			}
 			fmt.Fprintln(stdout, "ready dependency", name)
 		}
+		if err := runHooks(ctx, k, bz, cfg, cfg.Hooks.BeforeUp, rev, c.owner, route, stdout); err != nil {
+			return err
+		}
 		for _, name := range selectedTasks {
 			if err := runTask(ctx, k, bz, cfg, name, rev, c.owner, route, stdout); err != nil {
 				return err
 			}
 		}
-		ttl, err := time.ParseDuration(cfg.TTL)
-		if err != nil {
-			return fmt.Errorf("ttl: %w", err)
-		}
-		expiry := time.Now().Add(ttl)
 		fmt.Fprintf(stdout, "branch=%s owner=%s route=%s base=%s affected=%s\n", branch, c.owner, route, merge, names(ds))
 		affected := make(map[string]bool, len(ds))
 		resolvedImages := make(map[string]string, len(ds))
@@ -275,6 +288,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "resolved %s to %s\n", d.Name, resolved)
 		}
 		for _, d := range ds {
+			if err := runHooks(ctx, k, bz, cfg, cfg.Hooks.Deployables[d.Name].BeforeStart, rev, c.owner, route, stdout); err != nil {
+				return err
+			}
 			if err := k.ApplyOverlay(ctx, cfg, d, resolvedImages[d.Name], c.owner, branch, rev, c.base, merge, route, expiry); err != nil {
 				return err
 			}
@@ -287,7 +303,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 		}
-		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
 		for _, d := range ds {
 			if err := loop.Initial(ctx, d); err != nil {
 				_ = k.In(d.WorkloadNamespace(cfg)).RecordSync(ctx, route, d.Name, err)
@@ -407,19 +422,181 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 			return fmt.Errorf("deployable %s has unsafe syncStripPrefix", d.Name)
 		}
 	}
+	for name := range cfg.Hooks.Deployables {
+		if !seen[name] {
+			return fmt.Errorf("hook names unknown deployable %q", name)
+		}
+	}
 	return nil
 }
 
-func cleanup(ctx context.Context, k kube.Client, cfg config.Config, now time.Time) (int, error) {
-	total := 0
-	for _, namespace := range cfg.Namespaces {
-		n, err := k.In(namespace).Cleanup(ctx, now)
-		if err != nil {
-			return total, err
+func runHooks(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Config, tasks []string, revision, owner, route string, w io.Writer) error {
+	for _, name := range tasks {
+		if err := runTask(ctx, k, bz, cfg, name, revision, owner, route, w); err != nil {
+			return err
 		}
-		total += n
 	}
-	return total, nil
+	return nil
+}
+
+func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, route string, w io.Writer) error {
+	marker, err := k.ReadLifecycle(ctx, route)
+	if err != nil {
+		return err
+	}
+	if marker != nil {
+		if owner != marker.Owner {
+			return fmt.Errorf("route %s belongs to %s", route, marker.Owner)
+		}
+		for _, name := range marker.Hooks.TaskNames() {
+			if _, ok := cfg.Task(name); !ok {
+				return fmt.Errorf("route %s recorded task %q is missing from config", route, name)
+			}
+		}
+	}
+	stopped := map[string]bool{}
+	if marker == nil || !marker.OverlaysStopped {
+		if marker != nil {
+			for _, name := range marker.Deployables {
+				stopped[name] = true
+			}
+		}
+		for _, namespace := range cfg.Namespaces {
+			list, err := k.In(namespace).List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.OwnerLabel+"="+naming.Slug(owner, 40)+","+kube.RouteLabel+"="+route)
+			if err != nil {
+				return err
+			}
+			for _, item := range list.Items {
+				if name := item.Metadata.Labels[kube.ServiceLabel]; name != "" {
+					stopped[name] = true
+				}
+			}
+		}
+		services := make([]string, 0, len(stopped))
+		for name := range stopped {
+			services = append(services, name)
+		}
+		sort.Strings(services)
+		if marker != nil {
+			marker.Deployables = services
+			if err := k.SaveLifecycle(ctx, route, *marker); err != nil {
+				return err
+			}
+		}
+		for _, namespace := range cfg.Namespaces {
+			if err := k.In(namespace).Down(ctx, owner, route); err != nil {
+				return err
+			}
+		}
+		for _, name := range services {
+			for _, namespace := range cfg.Namespaces {
+				if err := k.In(namespace).WaitStopped(ctx, route, name); err != nil {
+					return err
+				}
+			}
+		}
+		if marker != nil {
+			marker.Deployables = services
+			marker.OverlaysStopped = true
+			if err := k.SaveLifecycle(ctx, route, *marker); err != nil {
+				return err
+			}
+		}
+	}
+	if marker != nil {
+		bz := bazel.Bazel{Run: k.Run, Args: cfg.BazelArgs}
+		for _, name := range marker.Deployables {
+			if err := runHooks(ctx, k, bz, cfg, marker.Hooks.Deployables[name].AfterStop, marker.Revision, owner, route, w); err != nil {
+				return err
+			}
+		}
+		if err := runHooks(ctx, k, bz, cfg, marker.Hooks.AfterDown, marker.Revision, owner, route, w); err != nil {
+			return err
+		}
+	}
+	for _, dependency := range cfg.Dependencies {
+		if err := k.RemoveDependency(ctx, dependency, owner, route); err != nil {
+			return err
+		}
+	}
+	for _, namespace := range cfg.Namespaces {
+		if err := k.In(namespace).DeleteTasks(ctx, owner, route); err != nil {
+			return err
+		}
+	}
+	if marker != nil {
+		return k.DeleteLifecycle(ctx, owner, route)
+	}
+	return nil
+}
+
+func cleanup(ctx context.Context, k kube.Client, cfg config.Config, now time.Time, hooks bool, w io.Writer, protectedRoute ...string) (int, error) {
+	expiries := map[string]time.Time{}
+	for _, namespace := range cfg.Namespaces {
+		routes, err := k.In(namespace).Cleanup(ctx, now)
+		if err != nil {
+			return 0, err
+		}
+		for route, expiry := range routes {
+			if expiry.After(expiries[route]) {
+				expiries[route] = expiry
+			}
+		}
+	}
+	routes := make([]string, 0, len(expiries))
+	for route, expiry := range expiries {
+		if now.After(expiry) {
+			routes = append(routes, route)
+		}
+	}
+	sort.Strings(routes)
+	removed := 0
+	for _, route := range routes {
+		marker, err := k.ReadLifecycle(ctx, route)
+		if err != nil {
+			return removed, err
+		}
+		if marker != nil {
+			if !hooks {
+				continue
+			}
+			missing := ""
+			for _, name := range marker.Hooks.TaskNames() {
+				if _, ok := cfg.Task(name); !ok {
+					missing = name
+					break
+				}
+			}
+			if missing != "" {
+				fmt.Fprintf(w, "warning: route %s teardown skipped: recorded task %q is missing from config\n", route, missing)
+				continue
+			}
+			if marker.Checkout != "" {
+				root, err := os.Getwd()
+				if err != nil {
+					return removed, err
+				}
+				protected := len(protectedRoute) > 0 && protectedRoute[0] == route && marker.Checkout == root
+				if !protected {
+					if _, err := localstate.New(marker.Checkout, route).Stop(); err != nil {
+						return removed, fmt.Errorf("stop local loop for route %s: %w", route, err)
+					}
+				}
+			}
+			if err := teardown(ctx, k, cfg, marker.Owner, route, w); err != nil {
+				return removed, err
+			}
+		} else {
+			for _, namespace := range cfg.Namespaces {
+				sel := kube.ManagedLabel + "=dev-cli," + kube.RouteLabel + "=" + route
+				if _, err := k.In(namespace).RunKubectl(ctx, []string{"delete", "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io", "-l", sel, "--ignore-not-found=true", "--cascade=foreground", "--wait=true", "--timeout=120s"}, nil); err != nil {
+					return removed, err
+				}
+			}
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 type lockedWriter struct {
@@ -599,6 +776,11 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 		age = time.Since(created).Round(time.Second).String()
 	}
 	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
+	marker, err := k.ReadLifecycle(ctx, route)
+	if err != nil {
+		return err
+	}
+	out["teardownPending"] = marker != nil && (marker.OverlaysStopped || time.Now().After(marker.Expiry))
 	out["routingHealth"] = routingHealth
 	urls, baseURLs := map[string]string{}, map[string]string{}
 	for _, host := range cfg.PublicHosts {

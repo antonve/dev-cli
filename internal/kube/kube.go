@@ -27,7 +27,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	cliVersion     = "v0.5.1"
+	cliVersion     = "v0.6.0"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io"
 )
 
@@ -236,7 +236,7 @@ func annotations(owner, branch, revision, baseRef, baseRevision, image string, e
 		"dev-cli.io/source-revision": revision, "dev-cli.io/base-ref": baseRef,
 		"dev-cli.io/base-revision": baseRevision, "dev-cli.io/image": image,
 		"dev-cli.io/created-at": created, "dev-cli.io/last-sync-at": time.Now().UTC().Format(time.RFC3339),
-		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339), "dev-cli.io/cli-version": cliVersion,
+		"dev-cli.io/expires-at": expiry.UTC().Format(time.RFC3339Nano), "dev-cli.io/cli-version": cliVersion,
 	}
 }
 
@@ -758,12 +758,19 @@ func (c Client) SyncBinary(ctx context.Context, pod, container, local, name, hea
 }
 
 func (c Client) Down(ctx context.Context, owner, route string) error {
-	sel := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
-	if _, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", sel, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil); err != nil {
-		return err
-	}
-	taskSelector := ManagedLabel + "=" + taskManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
-	_, err := c.RunKubectl(ctx, []string{"delete", "jobs", "-l", taskSelector, "--ignore-not-found=true", "--wait=true", "--timeout=30s"}, nil)
+	sel := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route + "," + LifecycleLabel + "!=true"
+	_, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", sel, "--ignore-not-found=true", "--cascade=foreground", "--wait=true", "--timeout=120s"}, nil)
+	return err
+}
+
+func (c Client) DeleteTasks(ctx context.Context, owner, route string) error {
+	sel := ManagedLabel + "=" + taskManaged + "," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
+	_, err := c.RunKubectl(ctx, []string{"delete", "jobs", "-l", sel, "--ignore-not-found=true", "--cascade=foreground", "--wait=true", "--timeout=120s"}, nil)
+	return err
+}
+
+func (c Client) WaitStopped(ctx context.Context, route, service string) error {
+	_, err := c.RunKubectl(ctx, []string{"wait", "--for=delete", "pod", "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route + "," + ServiceLabel + "=" + service, "--timeout=120s"}, nil)
 	return err
 }
 
@@ -783,7 +790,7 @@ func (c Client) RecordSync(ctx context.Context, route, service string, syncErr e
 }
 
 func (c Client) Heartbeat(ctx context.Context, route string, ttl time.Duration) error {
-	_, err := c.RunKubectl(ctx, []string{"annotate", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339)}, nil)
+	_, err := c.RunKubectl(ctx, []string{"annotate", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--overwrite", "dev-cli.io/last-seen-at=" + time.Now().UTC().Format(time.RFC3339), "dev-cli.io/expires-at=" + time.Now().Add(ttl).UTC().Format(time.RFC3339Nano)}, nil)
 	return err
 }
 func (c Client) Logs(ctx context.Context, route, service, container string, stdout, stderr io.Writer) error {
@@ -835,14 +842,14 @@ func (c Client) ListRoutes(ctx context.Context, selector string) (ObjectList, er
 	err = json.Unmarshal(out, &v)
 	return v, err
 }
-func (c Client) Cleanup(ctx context.Context, now time.Time) (int, error) {
+func (c Client) Cleanup(ctx context.Context, now time.Time) (map[string]time.Time, error) {
 	out, err := c.RunKubectl(ctx, []string{"get", ownedResources, "-l", ManagedLabel + "=dev-cli", "-o", "json"}, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var v ObjectList
 	if err := json.Unmarshal(out, &v); err != nil {
-		return 0, err
+		return nil, err
 	}
 	expiries := map[string]time.Time{}
 	for _, i := range v.Items {
@@ -852,17 +859,7 @@ func (c Client) Cleanup(ctx context.Context, now time.Time) (int, error) {
 			expiries[route] = exp
 		}
 	}
-	removed := 0
-	for route, expiry := range expiries {
-		if !now.After(expiry) {
-			continue
-		}
-		if _, err := c.RunKubectl(ctx, []string{"delete", ownedResources, "-l", ManagedLabel + "=dev-cli," + RouteLabel + "=" + route, "--ignore-not-found=true"}, nil); err != nil {
-			return removed, err
-		}
-		removed++
-	}
-	return removed, nil
+	return expiries, nil
 }
 
 func (v ObjectList) RoutesReady() bool {
