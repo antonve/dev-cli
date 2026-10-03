@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,7 +25,6 @@ type Config struct {
 	ClusterIssuer     string            `json:"clusterIssuer"`
 	GatewayName       string            `json:"gatewayName"`
 	GatewayNamespace  string            `json:"gatewayNamespace"`
-	CookieName        string            `json:"cookieName"`
 	TTL               string            `json:"ttl"`
 	MetadataQuery     string            `json:"metadataQuery"`
 	Namespaces        []string          `json:"namespaces"`
@@ -239,11 +237,8 @@ func Load(path string) (Config, error) {
 	if c.InternalGateway == "" {
 		c.InternalGateway = "http://dev-cli-gateway." + c.Namespace + ".svc.cluster.local"
 	}
-	if c.CookieName == "" {
-		c.CookieName = "dev_branch"
-	}
-	if err := (&http.Cookie{Name: c.CookieName, Value: "route"}).Valid(); err != nil {
-		return Config{}, fmt.Errorf("invalid cookieName: %w", err)
+	if c.ClusterIssuer == "" {
+		return Config{}, fmt.Errorf("clusterIssuer is required: branch hosts are the only branch selection")
 	}
 	if c.TTL == "" {
 		c.TTL = "8h"
@@ -275,11 +270,9 @@ func Load(path string) (Config, error) {
 	if c.IngressHost != "" && len(c.PublicHosts) == 0 {
 		c.PublicHosts = []string{c.IngressHost}
 	}
-	if c.ClusterIssuer != "" {
-		for _, host := range c.PublicHosts {
-			if _, err := deeplink.HostURL(host, strings.Repeat("a", 47), "/"); err != nil {
-				return Config{}, fmt.Errorf("public host %q must be a DNS hostname with room for a 47-character branch label", host)
-			}
+	for _, host := range c.PublicHosts {
+		if _, err := deeplink.HostURL(host, strings.Repeat("a", 47), "/"); err != nil {
+			return Config{}, fmt.Errorf("public host %q must be a DNS hostname with room for a 47-character branch label", host)
 		}
 	}
 	for i := range c.Dependencies {

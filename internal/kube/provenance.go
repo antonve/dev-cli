@@ -1,20 +1,14 @@
 package kube
 
-import "github.com/antonve/dev-cli/internal/deeplink"
-
 // Envoy resolves the upstream formatter after health-based backend selection.
 // A route's branch is intent, never evidence that its overlay handled a request.
 func routeHeaderFilters(selection string, public, proxy bool) []any {
 	remove := []string{"x-dev-selected", "x-dev-backend", "x-dev-proxy-backend"}
 	request := map[string]any{"remove": remove}
-	if selection == deeplink.Base {
-		request["remove"] = append(remove, "x-dev-branch")
-	} else {
-		request["set"] = []any{map[string]any{"name": "x-dev-branch", "value": selection}}
-	}
+	request["set"] = []any{map[string]any{"name": "x-dev-branch", "value": selection}}
 	set := []any{}
 	if public {
-		set = append(set, map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "Vary", "value": "Cookie"})
+		set = append(set, map[string]any{"name": "Cache-Control", "value": "no-store"})
 	}
 	backend := "x-dev-backend"
 	if proxy {

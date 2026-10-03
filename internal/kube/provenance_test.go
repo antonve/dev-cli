@@ -17,7 +17,7 @@ func TestRouteResponseProvenance(t *testing.T) {
 			t.Run(fmt.Sprintf("proxy=%t/affected=%t", proxy, affected), func(t *testing.T) {
 				r := &captureRunner{}
 				c := Client{Run: r, Context: "dev", Namespace: "ns"}
-				cfg := config.Config{Namespace: "ns", IngressHost: "app.dev.lab", CookieName: "dev_branch"}
+				cfg := config.Config{Namespace: "ns", IngressHost: "app.dev.lab", ClusterIssuer: "lab-ca-acme"}
 				d := config.Deployable{Name: "api", PublicPath: "/api", InternalHost: "api.internal", Port: 8080, ReadinessPath: "/readyz"}
 				if proxy {
 					d.PublicProxy = config.ObjectRef{Name: "auth", Port: 4455}
@@ -52,11 +52,11 @@ func TestRouteResponseProvenance(t *testing.T) {
 					if item.Kind != "HTTPRoute" {
 						continue
 					}
-					public := item.Spec.Hostnames[0] == cfg.IngressHost
-					for i, rule := range item.Spec.Rules {
+					public := item.Spec.Hostnames[0] == route+"."+cfg.IngressHost
+					for _, rule := range item.Spec.Rules {
 						checked++
 						if len(rule.Filters) != 2 || rule.Filters[0].Type != "RequestHeaderModifier" || rule.Filters[1].Type != "ResponseHeaderModifier" {
-							t.Fatal("every data/cookie/select/clear rule needs provenance filters")
+							t.Fatal("every internal/public rule needs provenance filters")
 						}
 						for _, header := range []string{"x-dev-selected", "x-dev-backend", "x-dev-proxy-backend"} {
 							if !slices.Contains(rule.Filters[0].RequestHeaderModifier.Remove, header) {
@@ -69,9 +69,6 @@ func TestRouteResponseProvenance(t *testing.T) {
 							values[header.Name] = header.Value
 						}
 						selection, backend := route, "x-dev-backend"
-						if public && i == 2 {
-							selection = "base"
-						}
 						if public && proxy {
 							backend = "x-dev-proxy-backend"
 							if _, overwritten := values["x-dev-backend"]; overwritten || slices.Contains(response.Remove, "x-dev-backend") {
@@ -85,8 +82,8 @@ func TestRouteResponseProvenance(t *testing.T) {
 						}
 					}
 				}
-				if checked != 4 {
-					t.Fatalf("checked %d rules, want internal + public cookie/select/clear", checked)
+				if checked != 2 {
+					t.Fatalf("checked %d rules, want internal + branch host", checked)
 				}
 			})
 		}

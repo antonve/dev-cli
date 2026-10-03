@@ -28,7 +28,7 @@ failure, and never acknowledge local shutdown before its work has stopped.
 
 Before releasing, run the playground's complete Bazel/pnpm/image gates and live
 branch conformance. Verify browser DOM HMR without navigation, binary restart
-and readiness recovery, two cookie sessions and internal hops, idempotent
+and readiness recovery, two branch hosts in one profile and internal hops, idempotent
 startup, deletion fallback, TTL cleanup, installation from a clean checkout,
 and a healthy Argo base. Tag only after those gates; test the published @latest
 installation separately.

@@ -159,7 +159,7 @@ func lifecycleFixture(t *testing.T) (*lifecycleRunner, config.Config, kube.Clien
 	root := t.TempDir()
 	t.Chdir(root)
 	r := &lifecycleRunner{root: root, objects: map[string][]byte{}}
-	cfg := config.Config{KubeContext: "dev", Namespace: "ns", Namespaces: []string{"ns"}, Registry: "registry.test", TaskLockNamespace: "ns", TTL: "8h"}
+	cfg := config.Config{ClusterIssuer: "lab-ca-acme", KubeContext: "dev", Namespace: "ns", Namespaces: []string{"ns"}, Registry: "registry.test", TaskLockNamespace: "ns", TTL: "8h"}
 	for _, name := range []string{"before", "start", "stop", "after"} {
 		if err := os.WriteFile(name+".json", []byte(`{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"hook"},"spec":{"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"hook","image":"busybox"}]}}}}`), 0600); err != nil {
 			t.Fatal(err)

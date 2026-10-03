@@ -46,7 +46,7 @@ install or provide a development server. The platform must supply Envoy
 Gateway with the Backend extension enabled and an attachable named Gateway.
 
 Create `.dev/config.yaml` with `kubeContext`, routing `namespace`, `registry`,
-`ingressHost`, `ingressClass`, `gatewayName`, `gatewayNamespace`, `cookieName`,
+`ingressHost`, `ingressClass`, required `clusterIssuer`, `gatewayName`, `gatewayNamespace`,
 `ttl`, and `metadataQuery`. Optional `namespaces` and `publicHosts` are explicit
 allowlists (both default to the legacy singular values). `internalGateway`
 defaults to the fully qualified `dev-cli-gateway` Service in the routing
@@ -63,6 +63,7 @@ filename (including `.yml`). For example:
 
 ```yaml
 kubeContext: homelab-dev
+clusterIssuer: lab-ca-acme
 namespace: dev-cli-playground
 registry: registry.dev.lab/dev-cli-playground
 ingressHost: dev-cli-playground.dev.lab
@@ -176,15 +177,14 @@ dev task --owner alice migrate
 dev up --owner alice --base origin/next # alternative comparison base
 dev status --owner alice
 dev url --owner alice '/settings?tab=profile'
-dev url --owner alice --clear '/settings'
 dev logs --owner alice                  # all overlay services/namespaces
 dev logs --owner alice hello-api        # optional service filter
 dev down --owner alice
 dev cleanup
 ```
 
-Open the emitted environment URL, or use `dev url` for a deep link. Envoy sets
-the cookie without an application menu or handler. The key includes the owner
+Open the emitted branch-host URL, or use `dev url` for a deep link. The hostname
+selects the environment without a routing cookie. The key includes the owner
 so two developers can use the same branch name. See [deep links](deep-links.md).
 Ctrl-C stops the foreground loop but retains overlays for inspection. Restart
 with the same checkout/owner/branch, or use `dev down` for explicit cleanup.

@@ -10,13 +10,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/antonve/dev-cli/internal/config"
-	"github.com/antonve/dev-cli/internal/deeplink"
 	"github.com/antonve/dev-cli/internal/document"
 	"github.com/antonve/dev-cli/internal/execx"
 	"github.com/antonve/dev-cli/internal/naming"
@@ -27,7 +25,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	CLIVersion     = "v0.8.0"
+	CLIVersion     = "v0.9.0"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io,ingresses.networking.k8s.io"
 )
 
@@ -406,14 +404,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		cfg.Namespace = c.Namespace
 	}
 	created, items := time.Now().UTC().Format(time.RFC3339), []any{}
-	ttl := 8 * time.Hour
-	if cfg.TTL != "" {
-		var err error
-		ttl, err = time.ParseDuration(cfg.TTL)
-		if err != nil || ttl < time.Second {
-			return fmt.Errorf("ttl must be a duration of at least 1s")
-		}
-	}
+	legacyRoutes := []string{}
 	for _, d := range deployables {
 		if d.Kind == "worker" || d.PublicPath == "" && d.InternalHost == "" {
 			continue
@@ -430,10 +421,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			directRoutes = append(directRoutes, dataRouteName)
 		}
 		if d.PublicPath != "" && d.Proxy(cfg).Name == "" {
-			directRoutes = append(directRoutes, publicRouteName)
-			if cfg.ClusterIssuer != "" {
-				directRoutes = append(directRoutes, naming.Resource("route-host-"+d.Name, route))
-			}
+			directRoutes = append(directRoutes, naming.Resource("route-host-"+d.Name, route))
 		}
 		if affected[d.Name] {
 			failover, refs := c.failoverResources(cfg, d, directRoutes, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
@@ -446,33 +434,23 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 			items = append(items, routeObject(cfg, d, dataRouteName, []any{d.InternalHost}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
 		}
 		if d.PublicPath != "" {
-			publicRefs, publicBaseRefs := backendRefs, baseRefs
+			publicRefs := backendRefs
 			if proxy := d.Proxy(cfg); proxy.Name != "" {
 				publicRefs = c.serviceBackendRefs(cfg, d, proxy, "proxy-", owner, branch, revision, baseRef, baseRevision, route, expiry, created, &items)
-				publicBaseRefs = publicRefs
 			}
-			matches := []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}, "headers": []any{map[string]any{"name": "Cookie", "type": "RegularExpression", "value": "(^|.*;[ ]*)" + regexp.QuoteMeta(cfg.CookieName) + "=" + regexp.QuoteMeta(route) + "(;.*|$)"}}}}
-			filters := routeHeaderFilters(route, true, d.Proxy(cfg).Name != "")
-			rules := []any{map[string]any{"matches": matches, "filters": filters, "backendRefs": publicRefs}}
-			rules = append(rules, selectionRule(cfg, d, route, int(ttl.Seconds()), publicRefs))
-			// Each owner carries an identical base-selection rule. There is no
-			// shared mutable CLI resource and down/TTL remain owner-scoped.
-			rules = append(rules, selectionRule(cfg, d, deeplink.Base, 0, publicBaseRefs))
-			items = append(items, routeObject(cfg, d, publicRouteName, []any{d.Host(cfg)}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
-			if cfg.ClusterIssuer != "" {
-				hostRule := map[string]any{
-					"matches":     []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}}},
-					"filters":     filters,
-					"backendRefs": publicRefs,
-				}
-				items = append(items, routeObject(cfg, d, naming.Resource("route-host-"+d.Name, route), []any{route + "." + d.Host(cfg)}, []any{hostRule}, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			hostRule := map[string]any{
+				"matches":     []any{map[string]any{"path": map[string]any{"type": "PathPrefix", "value": d.PublicPath}}},
+				"filters":     routeHeaderFilters(route, true, d.Proxy(cfg).Name != ""),
+				"backendRefs": publicRefs,
 			}
+			items = append(items, routeObject(cfg, d, naming.Resource("route-host-"+d.Name, route), []any{route + "." + d.Host(cfg)}, []any{hostRule}, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			legacyRoutes = append(legacyRoutes, publicRouteName)
 		}
 	}
 	if len(items) == 0 {
 		return nil
 	}
-	if cfg.ClusterIssuer != "" && len(cfg.PublicHosts) > 0 {
+	if len(cfg.PublicHosts) > 0 {
 		hosts, rules := []any{}, []any{}
 		for _, host := range cfg.PublicHosts {
 			host = route + "." + host
@@ -487,7 +465,16 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		ann["nginx.ingress.kubernetes.io/proxy-send-timeout"] = "3600"
 		items = append(items, map[string]any{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": meta, "spec": map[string]any{"ingressClassName": cfg.IngressClass, "tls": []any{map[string]any{"hosts": hosts, "secretName": naming.Resource("tls", route)}}, "rules": rules}})
 	}
-	return c.writeOwnedObjects(ctx, items, owner, route)
+	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
+		return err
+	}
+	for _, name := range legacyRoutes {
+		selector := ManagedLabel + "=dev-cli," + OwnerLabel + "=" + naming.Slug(owner, 40) + "," + RouteLabel + "=" + route
+		if _, err := c.RunKubectl(ctx, []string{"delete", "httproute", "-l", selector, "--field-selector", "metadata.name=" + name, "--ignore-not-found=true"}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c Client) serviceBackendRefs(cfg config.Config, d config.Deployable, ref config.ObjectRef, prefix, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string, items *[]any) []any {
