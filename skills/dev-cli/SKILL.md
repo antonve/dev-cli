@@ -28,8 +28,9 @@ Reading `dev status` or `dev doctor` output the maintainer shares is fine.
 - Check `dev version`, Git branch/status and `git fetch origin main`, then
   `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
   require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
-  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer, and variables/profiles require v0.7.0
-  or newer. Doctor is a prerequisite check, not an
+  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer, variables/profiles require v0.7.0
+  or newer, and environment overrides, `hostTLS: gateway` and production mode
+  require v0.10.0 or newer. Doctor is a prerequisite check, not an
   end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
   or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
@@ -88,7 +89,7 @@ sync and is not live development.
 
 ## Give the user a clickable link
 
-v0.9.0 requires `clusterIssuer` and prints branch-host links. Each branch is its
+With certificate host TLS (the default), `clusterIssuer` is required; the CLI prints branch-host links. Each branch is its
 own browser origin, so independent owners work in one profile. Application login
 remains application-owned. Verify TLS readiness and owned Ingress/Certificate/
 Secret removal on down; cert-manager must enable certificate owner references.
