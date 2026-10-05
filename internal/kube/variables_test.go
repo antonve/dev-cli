@@ -21,7 +21,7 @@ func TestVariablesRenderWorkloadTaskAndDependency(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	template, err := loadPodTemplate("workload.json", "route", "apps", vars)
+	template, err := loadPodTemplate("", "workload.json", "route", "apps", vars)
 	if err != nil {
 		t.Fatal(err)
 	}

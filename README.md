@@ -71,6 +71,41 @@ security model, lifecycle, and recovery behavior.
 credentials and the target repository contract. [Contributing](docs/contributing.md)
 describes the local build and release gates.
 
+## Environment overrides
+
+One repository's deployable metadata can drive a second environment from a
+configuration file kept outside the repository:
+
+```yaml
+manifestsRelativeTo: config      # templates and task/dependency manifests
+hostTLS: gateway                 # reuse the gateway's wildcard listener TLS
+gatewayName: edge
+gatewayNamespace: gateway
+internalGatewayName: internal    # parent of internalHost routes
+internalGatewayNamespace: routing
+deployables:
+  api:
+    namespace: prod-api
+    workloadTemplate: api.yaml
+    baseService: {name: api, namespace: prod-api, port: 80}
+    publicProxy: {name: oathkeeper-proxy, namespace: prod-auth, port: 4455}
+    internalHost: api-internal.prod-auth.svc.cluster.local
+    publicHost: preview.example.com
+```
+
+An override replaces only the fields it sets; naming a deployable the metadata
+query does not return fails the command. `manifestsRelativeTo: config` resolves
+workload templates, tasks and dependencies against the configuration file's
+directory with the same symlink-escape check; Git and Bazel still run in the
+checkout. `hostTLS: gateway` creates no Ingress or certificate: host routes
+attach to the public gateway, whose wildcard listener terminates TLS, and
+`clusterIssuer` is not required. The internal gateway defaults to the public
+one. Branch-host responses carry `X-Robots-Tag: noindex, nofollow`.
+
+Digest resolution answers a registry's anonymous Bearer challenge, as ghcr.io
+requires; a denied token fails with "image is not anonymously pullable" and
+names the repository. `dev doctor` accepts HTTP 401 from the registry root.
+
 ## Agent skill
 
 The portable [dev-cli skill](skills/dev-cli/SKILL.md) teaches agents the actual
