@@ -25,7 +25,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	CLIVersion     = "v0.9.0"
+	CLIVersion     = "v0.10.0"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io,ingresses.networking.k8s.io"
 )
 
@@ -250,9 +250,6 @@ func annotations(owner, branch, revision, baseRef, baseRevision, image string, e
 
 func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.Deployable, image, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
 	c = c.In(d.WorkloadNamespace(cfg))
-	if cfg.InternalGateway == "" {
-		cfg.InternalGateway = "http://dev-cli-gateway." + cfg.Namespace + ".svc.cluster.local"
-	}
 	name := naming.Resource(d.Name, route)
 	created := time.Now().UTC().Format(time.RFC3339)
 	if existing, err := c.RunKubectl(ctx, []string{"get", "deployment", name, "-o", "jsonpath={.metadata.annotations.dev-cli\\.io/created-at}"}, nil); err == nil && strings.TrimSpace(string(existing)) != "" {
@@ -261,10 +258,6 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	ann, lbl := annotations(owner, branch, revision, baseRef, baseRevision, image, expiry, created), labels(owner, route, d.Name)
 	ann["dev-cli.io/dev-container"] = d.Container()
 	ann["dev-cli.io/kind"] = d.Kind
-	env := []any{
-		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
-		map[string]any{"name": "DEV_NAMESPACE", "value": c.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": cfg.InternalGateway},
-	}
 	template, err := loadPodTemplate(c.ManifestRoot, d.WorkloadTemplate, route, c.Namespace, c.Variables)
 	if err != nil {
 		return err
@@ -296,6 +289,74 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	if containerIndex >= 0 {
 		app = stringMap(containers[containerIndex].(map[string]any))
 	}
+	items := []any{}
+	if cfg.Mode == config.ModeProduction {
+		// Release images run unchanged: distroless images have no shell for a
+		// supervisor, and the template already carries the base runtime.
+		if d.WorkloadTemplate == "" {
+			return fmt.Errorf("production overlay %s requires a workload template", d.Name)
+		}
+		app["image"], app["imagePullPolicy"] = image, "IfNotPresent"
+	} else {
+		items = developmentRuntime(cfg, d, app, podSpec, name, branch, revision, c.Namespace, image, lbl, ann)
+	}
+	if containerIndex < 0 {
+		containers = append(containers, app)
+	} else {
+		containers[containerIndex] = app
+	}
+	podSpec["containers"] = containers
+	podAnnotations := map[string]any{}
+	if metadata != nil {
+		if original, ok := metadata["annotations"].(map[string]any); ok {
+			podAnnotations = stringMap(original)
+		}
+	}
+	podAnnotations["dev-cli.io/branch-original"], podAnnotations["dev-cli.io/source-revision"], podAnnotations["dev-cli.io/cli-version"] = branch, revision, CLIVersion
+	deploy := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": name, "labels": lbl, "annotations": ann},
+		"spec": map[string]any{
+			"replicas": 1,
+			"selector": map[string]any{"matchLabels": map[string]any{RouteLabel: route, ServiceLabel: d.Name}},
+			"template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": podAnnotations}, "spec": podSpec},
+		},
+	}
+	items = append(items, deploy)
+	if d.Kind != "worker" {
+		svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
+		items = append(items, svc)
+	}
+	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
+		return err
+	}
+	if cfg.Mode == config.ModeProduction {
+		_, err := c.RunKubectl(ctx, []string{"rollout", "status", "deployment/" + name, "--timeout=5m"}, nil)
+		return err
+	}
+	if d.Kind == "frontend" {
+		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		selector := RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
+		// Deployment creation can return before its ReplicaSet creates a Pod.
+		if _, err := c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=create", "--timeout=90s"}, nil); err != nil {
+			return err
+		}
+		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
+		return err
+	}
+	return c.WaitOverlay(ctx, d, route)
+}
+
+// developmentRuntime adds the CLI's live-update runtime to the designated
+// container: the supervisor for binaries, the dev command for frontends, and
+// default probes, ports and resources. It returns the supervisor ConfigMap.
+func developmentRuntime(cfg config.Config, d config.Deployable, app, podSpec map[string]any, name, branch, revision, namespace, image string, lbl, ann map[string]any) []any {
+	internalGateway := cfg.InternalGateway
+	if internalGateway == "" {
+		internalGateway = "http://dev-cli-gateway." + cfg.Namespace + ".svc.cluster.local"
+	}
 	command := []any{}
 	if existing, ok := app["command"].([]any); ok {
 		command = existing
@@ -307,6 +368,10 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		}
 	}
 	volumes, mounts, items := []any{}, []any{}, []any{}
+	env := []any{
+		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
+		map[string]any{"name": "DEV_NAMESPACE", "value": namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": internalGateway},
+	}
 	security, _ := app["securityContext"].(map[string]any)
 	if security == nil {
 		security = map[string]any{"allowPrivilegeEscalation": false, "runAsNonRoot": true, "runAsUser": 1000, "runAsGroup": 1000}
@@ -348,56 +413,15 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	if _, ok := app["resources"]; !ok {
 		app["resources"] = map[string]any{"requests": map[string]any{"cpu": "10m", "memory": "32Mi"}, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}}
 	}
-	if containerIndex < 0 {
-		containers = append(containers, app)
-	} else {
-		containers[containerIndex] = app
-	}
 	existingVolumes := anySlice(podSpec["volumes"])
 	for _, value := range volumes {
 		existingVolumes = mergeNamed(existingVolumes, value.(map[string]any))
 	}
-	podSpec["containers"], podSpec["volumes"] = containers, existingVolumes
+	podSpec["volumes"] = existingVolumes
 	if _, ok := podSpec["securityContext"]; !ok {
 		podSpec["securityContext"] = map[string]any{"fsGroup": 65532}
 	}
-	podAnnotations := map[string]any{}
-	if metadata != nil {
-		if original, ok := metadata["annotations"].(map[string]any); ok {
-			podAnnotations = stringMap(original)
-		}
-	}
-	podAnnotations["dev-cli.io/branch-original"], podAnnotations["dev-cli.io/source-revision"], podAnnotations["dev-cli.io/cli-version"] = branch, revision, CLIVersion
-	deploy := map[string]any{
-		"apiVersion": "apps/v1",
-		"kind":       "Deployment",
-		"metadata":   map[string]any{"name": name, "labels": lbl, "annotations": ann},
-		"spec": map[string]any{
-			"replicas": 1,
-			"selector": map[string]any{"matchLabels": map[string]any{RouteLabel: route, ServiceLabel: d.Name}},
-			"template": map[string]any{"metadata": map[string]any{"labels": lbl, "annotations": podAnnotations}, "spec": podSpec},
-		},
-	}
-	items = append(items, deploy)
-	if d.Kind != "worker" {
-		svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
-		items = append(items, svc)
-	}
-	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
-		return err
-	}
-	if d.Kind == "frontend" {
-		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-		selector := RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
-		// Deployment creation can return before its ReplicaSet creates a Pod.
-		if _, err := c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=create", "--timeout=90s"}, nil); err != nil {
-			return err
-		}
-		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
-		return err
-	}
-	return c.WaitOverlay(ctx, d, route)
+	return items
 }
 
 func anySlice(v any) []any { values, _ := v.([]any); return values }
@@ -944,3 +968,21 @@ func (c Client) WaitRoutes(ctx context.Context, route string) error {
 }
 
 func ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func (c Client) NamespaceLabels(ctx context.Context, namespace string) (map[string]string, error) {
+	out, err := c.RunKubectl(ctx, []string{"get", "namespace", namespace, "-o", "json"}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("inspect namespace %s: %w", namespace, err)
+	}
+	var object struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if len(bytes.TrimSpace(out)) > 0 {
+		if err := json.Unmarshal(out, &object); err != nil {
+			return nil, fmt.Errorf("inspect namespace %s: %w", namespace, err)
+		}
+	}
+	return object.Metadata.Labels, nil
+}

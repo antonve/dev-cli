@@ -160,3 +160,9 @@ func (b Bazel) BuildOutput(ctx context.Context, target string) (string, error) {
 }
 
 func configuredTarget(target string) string { return "config(" + target + ", target)" }
+
+// Definition returns a target's rule as `bazel query --output=build` prints it.
+func (b Bazel) Definition(ctx context.Context, target string) (string, error) {
+	out, err := b.Run.Run(ctx, "bazel", []string{"query", "--output=build", "--noshow_progress", target}, nil)
+	return string(out), err
+}

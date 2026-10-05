@@ -39,6 +39,11 @@ type Config struct {
 	Variables         map[string]string `json:"variables"`
 	Profiles          []Profile         `json:"profiles"`
 
+	// Mode production deploys release images by digest from clean, pushed
+	// commits and never runs a development sync loop.
+	Mode               Mode     `json:"mode"`
+	RefuseChangedPaths []string `json:"refuseChangedPaths"`
+
 	// HostTLS selects who terminates TLS for branch hosts: a per-branch
 	// cert-manager certificate behind an Ingress, or the gateway's own
 	// wildcard listener.
@@ -52,6 +57,13 @@ type Config struct {
 	// against. Empty means the repository checkout.
 	ManifestRoot string `json:"-"`
 }
+
+type Mode string
+
+const (
+	ModeDevelopment Mode = "development"
+	ModeProduction  Mode = "production"
+)
 
 type HostTLS string
 
@@ -250,6 +262,22 @@ type Deployable struct {
 	SyncRoot          string    `json:"syncRoot"`
 	SyncStripPrefix   string    `json:"syncStripPrefix"`
 	SyncExcludes      []string  `json:"syncExcludes"`
+	Release           Release   `json:"release"`
+}
+
+// Release names the repository-owned entrypoint that publishes the image CI
+// releases, without fixed repository or tags.
+type Release struct {
+	ImageName  string `json:"imageName"`
+	PushTarget string `json:"pushTarget"`
+}
+
+// Image returns the image name and push target the mode publishes.
+func (d Deployable) Image(mode Mode) (string, string) {
+	if mode == ModeProduction {
+		return d.Release.ImageName, d.Release.PushTarget
+	}
+	return d.ImageName, d.PushTarget
 }
 
 func Load(path string) (Config, error) {
@@ -304,6 +332,28 @@ func Load(path string) (Config, error) {
 	}
 	if c.HostTLS == HostTLSCertificate && c.ClusterIssuer == "" {
 		return Config{}, fmt.Errorf("clusterIssuer is required: branch hosts are the only branch selection")
+	}
+	switch c.Mode {
+	case "":
+		c.Mode = ModeDevelopment
+	case ModeDevelopment:
+	case ModeProduction:
+		if !strings.HasSuffix(strings.TrimSuffix(c.Registry, "/"), "/branches") {
+			return Config{}, fmt.Errorf("production registry must end in /branches")
+		}
+		if !contains(c.BazelArgs, "--config=release") {
+			return Config{}, fmt.Errorf("production bazelArgs must include --config=release")
+		}
+		if len(c.RefuseChangedPaths) == 0 {
+			return Config{}, fmt.Errorf("production requires refuseChangedPaths")
+		}
+	default:
+		return Config{}, fmt.Errorf("mode must be development or production")
+	}
+	for _, prefix := range c.RefuseChangedPaths {
+		if !filepath.IsLocal(prefix) {
+			return Config{}, fmt.Errorf("refuseChangedPaths must be repository-relative prefixes: %q", prefix)
+		}
 	}
 	switch c.ManifestsRelativeTo {
 	case "", "repository":

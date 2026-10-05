@@ -41,9 +41,10 @@ stays in the foreground and supervises live updates. Stop it with
 Ctrl-C; the Kubernetes resources remain until `dev down` or TTL cleanup. It is
 safe to rerun. Set `DEV_OWNER` or pass `--owner` to choose the ownership
 identity. `dev up` prints clickable environment and base links; `dev status`
-includes branch and plain base URLs. v0.9.0 requires `clusterIssuer` and creates
-`https://<route>.<publicHost>/` for each public host, with an owned Ingress and
-certificate. Branch hosts are the only selection mechanism; separate owners
+includes branch and plain base URLs. With the default `hostTLS: certificate`,
+`clusterIssuer` is required and the CLI creates `https://<route>.<publicHost>/`
+for each public host, with an owned Ingress and certificate; v0.10.0 adds
+`hostTLS: gateway` to reuse a gateway wildcard certificate instead. Branch hosts are the only selection mechanism; separate owners
 work in one browser profile. Existing paths, query parameters and fragments
 are preserved. See [deep links](docs/deep-links.md) for the host contract and
 upgrade instructions.
@@ -105,6 +106,48 @@ one. Branch-host responses carry `X-Robots-Tag: noindex, nofollow`.
 Digest resolution answers a registry's anonymous Bearer challenge, as ghcr.io
 requires; a denied token fails with "image is not anonymously pullable" and
 names the repository. `dev doctor` accepts HTTP 401 from the registry root.
+
+## Production mode
+
+`mode: production` deploys a pushed branch commit as release-identical images,
+by digest, beside an existing environment's base workloads:
+
+```yaml
+mode: production
+registry: ghcr.io/org/repo/branches     # must end in /branches
+bazelArgs: [--config=release]           # required
+refuseChangedPaths: [services/api/migrations/]
+hostTLS: gateway
+manifestsRelativeTo: config
+deployables:                            # every deployable needs a template
+  api: {workloadTemplate: api.yaml}
+```
+
+Each deployable's metadata must declare
+`release: {imageName, pushTarget}`, the repository's release entrypoint
+without fixed repository or tags. Production ignores the development
+`imageName`, `pushTarget`, `devCommand`, sync and dependency settings.
+
+Before `up`, `task` and `provision` touch anything, the CLI refuses a dirty
+working tree, a HEAD no `origin` branch contains, a change under any
+`refuseChangedPaths` prefix, and a routing namespace without the labels
+`dev-cli.io/routing-enabled=true` and `dev-cli.io/environment=production`.
+Development configurations refuse a namespace with the production label.
+Every publication, including task images, passes one guard: the tag must be
+`<route>-<commit12>` (never `latest` or `prod`), the destination must be a
+single image under the configured registry, and `bazel query --output=build`
+of the push target must not set `repository` or `remote_tags`.
+
+`up` first resolves `<registry>/<release.imageName>:<route>-<commit12>` and
+reuses an existing tag; otherwise it runs the release push target and resolves
+the digest anonymously, which proves the cluster can pull it without a Secret.
+Overlays keep the template's command, arguments, probes, resources and
+security context and change only the image, labels and annotations; there is
+no supervisor, sync loop, heartbeat or HMR. `up` waits for every rollout and
+route, prints the route, commit, digests, branch URLs and expiry, then exits.
+Expiry is fixed at startup plus `ttl`; rerunning `up` renews it. `down` and
+`cleanup` run the same teardown hooks as development. `doctor` also checks the
+routing namespace labels and Docker.
 
 ## Agent skill
 

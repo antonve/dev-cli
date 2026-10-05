@@ -25,7 +25,6 @@ import (
 	"github.com/antonve/dev-cli/internal/kube"
 	"github.com/antonve/dev-cli/internal/localstate"
 	"github.com/antonve/dev-cli/internal/naming"
-	"github.com/antonve/dev-cli/internal/registry"
 	"github.com/antonve/dev-cli/internal/syncer"
 )
 
@@ -151,6 +150,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		_, _ = cleanup(ctx, k, cfg, time.Now(), false, stderr)
 		return status(ctx, k, cfg, c.owner, branch, route, local.Running(), stdout)
 	case "provision":
+		if err := preflight(ctx, g, k, cfg, c.base); err != nil {
+			return err
+		}
 		cfg, _, k, err = resolveProfileContext(ctx, g, k, cfg, route, c.base)
 		if err != nil {
 			return err
@@ -170,6 +172,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		}
 		return nil
 	case "task":
+		if err := preflight(ctx, g, k, cfg, c.base); err != nil {
+			return err
+		}
 		cfg, _, k, err = resolveProfileContext(ctx, g, k, cfg, route, c.base)
 		if err != nil {
 			return err
@@ -183,6 +188,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		}
 		return runTask(ctx, k, bz, cfg, f.Arg(0), rev, c.owner, route, stdout)
 	case "up":
+		if err := preflight(ctx, g, k, cfg, c.base); err != nil {
+			return err
+		}
+		production := cfg.Mode == config.ModeProduction
 		openURL, baseURL := "", ""
 		if cfg.IngressHost != "" {
 			openURL, err = deeplink.HostURL(cfg.IngressHost, route, "/")
@@ -264,9 +273,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			return err
 		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
-		stopHeartbeat, heartbeatErrors := loop.StartHeartbeat(ctx, ds)
-		defer stopHeartbeat()
-		loop.HeartbeatErrors = heartbeatErrors
+		if !production {
+			// Production expiry is fixed at startup; rerunning up renews it.
+			stopHeartbeat, heartbeatErrors := loop.StartHeartbeat(ctx, ds)
+			defer stopHeartbeat()
+			loop.HeartbeatErrors = heartbeatErrors
+		}
 		for _, name := range selectedDependencies {
 			d, ok := cfg.Dependency(name)
 			if !ok {
@@ -290,16 +302,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		resolvedImages := make(map[string]string, len(ds))
 		for _, d := range ds {
 			affected[d.Name] = true
-			tag := route + "-" + shortRevision(rev)
-			repository, tagged, err := registry.Destination(cfg.Registry, d.ImageName, tag)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(stdout, "publishing %s to %s\n", d.Name, tagged)
-			if err := bz.PushImage(ctx, d.PushTarget, repository, tag); err != nil {
-				return err
-			}
-			resolved, err := (registry.Resolver{}).Resolve(ctx, tagged)
+			imageName, pushTarget := d.Image(cfg.Mode)
+			resolved, err := publish(ctx, bz, cfg, imageName, pushTarget, route+"-"+shortRevision(rev), stdout)
 			if err != nil {
 				return err
 			}
@@ -329,13 +333,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			}
 		}
 		for _, d := range ds {
-			if err := loop.Initial(ctx, d); err != nil {
-				_ = k.In(d.WorkloadNamespace(cfg)).RecordSync(ctx, route, d.Name, err)
-				return err
-			}
-			if d.Kind == "frontend" {
-				if err := k.In(d.WorkloadNamespace(cfg)).WaitOverlay(ctx, d, route); err != nil {
+			if !production {
+				if err := loop.Initial(ctx, d); err != nil {
+					_ = k.In(d.WorkloadNamespace(cfg)).RecordSync(ctx, route, d.Name, err)
 					return err
+				}
+				if d.Kind == "frontend" {
+					if err := k.In(d.WorkloadNamespace(cfg)).WaitOverlay(ctx, d, route); err != nil {
+						return err
+					}
 				}
 			}
 			if err := k.In(d.WorkloadNamespace(cfg)).RecordSync(ctx, route, d.Name, nil); err != nil {
@@ -351,6 +357,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			}
 			link, _ := deeplink.HostURL(host, route, "/")
 			fmt.Fprintf(stdout, "Open environment (%s): %s\nOpen base (%s): https://%s/\n", host, link, host, host)
+		}
+		if production {
+			fmt.Fprintf(stdout, "route=%s commit=%s expires=%s\n", route, rev, expiry.UTC().Format(time.RFC3339))
+			return nil
 		}
 		if noWatch {
 			fmt.Fprintln(stdout, "overlays ready; watch disabled")
@@ -434,6 +444,15 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 		if proxy.Name != "" {
 			if d.PublicPath == "" || d.InternalHost == "" || proxy.Port < 1 || !cfg.AllowsNamespace(proxy.Namespace) {
 				return fmt.Errorf("deployable %s publicProxy requires publicPath, internalHost, positive port, and allowed namespace", d.Name)
+			}
+		}
+		if cfg.Mode == config.ModeProduction {
+			if d.Release.ImageName == "" || d.Release.PushTarget == "" {
+				return fmt.Errorf("production deployable %s requires release imageName and pushTarget metadata", d.Name)
+			}
+			// Fail closed: a metadata template is a development template.
+			if cfg.Deployables[d.Name].WorkloadTemplate == "" {
+				return fmt.Errorf("production deployable %s requires a deployables workloadTemplate override", d.Name)
 			}
 		}
 		if d.WorkloadTemplate != "" && !filepath.IsLocal(d.WorkloadTemplate) {
@@ -720,14 +739,8 @@ func runTask(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Conf
 	}
 	image := ""
 	if task.PushTarget != "" {
-		repository, tagged, err := registry.Destination(cfg.Registry, task.ImageName, route+"-"+shortRevision(revision))
-		if err != nil {
-			return err
-		}
-		if err := bz.PushImage(ctx, task.PushTarget, repository, route+"-"+shortRevision(revision)); err != nil {
-			return err
-		}
-		image, err = (registry.Resolver{}).Resolve(ctx, tagged)
+		var err error
+		image, err = publish(ctx, bz, cfg, task.ImageName, task.PushTarget, route+"-"+shortRevision(revision), w)
 		if err != nil {
 			return err
 		}
@@ -773,6 +786,20 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 		return fmt.Errorf("doctor registry: https://%s/v2/ returned HTTP %s", registryHost, status)
 	}
 	fmt.Fprintln(w, "ok registry")
+	labels, err := (kube.Client{Run: r, Context: c.KubeContext, Namespace: c.Namespace}).NamespaceLabels(ctx, c.Namespace)
+	if err != nil {
+		return fmt.Errorf("doctor routing namespace: %w", err)
+	}
+	if err := checkRoutingNamespace(c, labels); err != nil {
+		return fmt.Errorf("doctor routing namespace: %w", err)
+	}
+	fmt.Fprintln(w, "ok routing namespace", c.Mode)
+	if c.Mode == config.ModeProduction {
+		if _, err := r.Run(ctx, "docker", []string{"version"}, nil); err != nil {
+			return fmt.Errorf("doctor docker: %w", err)
+		}
+		fmt.Fprintln(w, "ok docker")
+	}
 	if c.HostTLS == config.HostTLSCertificate {
 		for _, args := range [][]string{
 			{"get", "ingressclass", c.IngressClass},
@@ -840,7 +867,7 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 		} else {
 			workerOnly = false
 		}
-		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "kind": a["dev-cli.io/kind"], "workload": item.Metadata.Name, "routing": routing, "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
+		services = append(services, map[string]any{"service": item.Metadata.Labels[kube.ServiceLabel], "kind": a["dev-cli.io/kind"], "workload": item.Metadata.Name, "image": a["dev-cli.io/image"], "routing": routing, "readyReplicas": item.Status.ReadyReplicas, "syncHealth": a["dev-cli.io/sync-health"], "syncError": a["dev-cli.io/sync-error"], "lastSyncAt": a["dev-cli.io/last-sync-at"]})
 	}
 	age := "0s"
 	routingHealth := "ready"
@@ -852,7 +879,7 @@ func status(ctx context.Context, k kube.Client, cfg config.Config, owner, branch
 	if created, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		age = time.Since(created).Round(time.Second).String()
 	}
-	out := map[string]any{"owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
+	out := map[string]any{"mode": cfg.Mode, "owner": owner, "branch": branch, "route": route, "baseRef": baseRef, "baseRevision": baseRevision, "sourceRevision": sourceRevision, "affectedServices": services, "routingResources": len(routes.Items), "syncHealth": health, "localLoopRunning": localRunning, "age": age, "expiresAt": expiresAt}
 	marker, err := k.ReadLifecycle(ctx, route)
 	if err != nil {
 		return err
