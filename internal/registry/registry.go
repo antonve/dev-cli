@@ -1,15 +1,26 @@
 package registry
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+var (
+	ErrNotFound    = errors.New("image tag not found")
+	ErrNotPullable = errors.New("image is not anonymously pullable")
+)
+
+var challengeParam = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json"
 
@@ -29,25 +40,40 @@ func Destination(registry, image, tag string) (repository, tagged string, err er
 	return repository, repository + ":" + tag, nil
 }
 
+// Resolve returns the digest reference of a tag as an anonymous client sees
+// it, answering a registry's Bearer challenge with an anonymous token.
 func (r Resolver) Resolve(ctx context.Context, tagged string) (string, error) {
 	parsed, err := parse(tagged)
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.manifestURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", manifestAccept)
 	client := r.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Do(req)
+	resp, err := getManifest(ctx, client, parsed.manifestURL, "")
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", tagged, err)
 	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		challenge := resp.Header.Get("WWW-Authenticate")
+		resp.Body.Close()
+		token, err := anonymousToken(ctx, client, challenge, parsed.canonicalRepository)
+		if err != nil {
+			return "", fmt.Errorf("resolve %s: %w", tagged, err)
+		}
+		if resp, err = getManifest(ctx, client, parsed.manifestURL, token); err != nil {
+			return "", fmt.Errorf("resolve %s: %w", tagged, err)
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			return "", fmt.Errorf("resolve %s: %w: %s", tagged, ErrNotPullable, parsed.canonicalRepository)
+		}
+	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("resolve %s: %w", tagged, ErrNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("resolve %s: registry returned %s: %s", tagged, resp.Status, strings.TrimSpace(string(body)))
@@ -65,6 +91,66 @@ func (r Resolver) Resolve(ctx context.Context, tagged string) (string, error) {
 		return "", fmt.Errorf("registry returned unsupported digest %q", digest)
 	}
 	return parsed.canonicalRepository + "@" + digest, nil
+}
+
+func getManifest(ctx context.Context, client *http.Client, manifestURL, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", manifestAccept)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return client.Do(req)
+}
+
+func anonymousToken(ctx context.Context, client *http.Client, challenge, repository string) (string, error) {
+	scheme, rawParams, _ := strings.Cut(challenge, " ")
+	if !strings.EqualFold(scheme, "Bearer") {
+		return "", fmt.Errorf("registry requires unsupported authentication %q", challenge)
+	}
+	params := map[string]string{}
+	for _, match := range challengeParam.FindAllStringSubmatch(rawParams, -1) {
+		params[strings.ToLower(match[1])] = match[2]
+	}
+	realm, err := url.Parse(params["realm"])
+	if err != nil || realm.Host == "" || realm.Scheme != "https" && realm.Scheme != "http" {
+		return "", fmt.Errorf("registry returned invalid token realm %q", params["realm"])
+	}
+	query := realm.Query()
+	for _, key := range []string{"service", "scope"} {
+		if params[key] != "" {
+			query.Set(key, params[key])
+		}
+	}
+	realm.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", fmt.Errorf("%w: %s", ErrNotPullable, repository)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("anonymous token request returned %s", resp.Status)
+	}
+	var body struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode anonymous token: %w", err)
+	}
+	if token := cmp.Or(body.Token, body.AccessToken); token != "" {
+		return token, nil
+	}
+	return "", errors.New("anonymous token response has no token")
 }
 
 type reference struct {
