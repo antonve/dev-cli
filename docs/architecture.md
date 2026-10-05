@@ -20,6 +20,13 @@ Original owner and branch values are retained in annotations. Every temporary
 resource carries owner, route, service, source/base revision, timestamps,
 expiry, and CLI version. The CLI never mutates an Argo-owned base Deployment.
 
+Configuration `deployables` overrides replace a deployable's namespace,
+workload template, base Service, public proxy, internal host and public host
+before validation, so a configuration outside the repository can target
+another environment. With `manifestsRelativeTo: config`, templates, tasks and
+dependencies resolve inside the configuration file's directory instead of the
+checkout.
+
 Deployables may name a repository-relative YAML or JSON `workloadTemplate` containing a
 Kubernetes `PodTemplateSpec` and a `devContainer`. The CLI preserves its pod
 spec—including service accounts, projected volumes, Secret references,
@@ -89,6 +96,13 @@ within one 120-second deadline and fails with a describe hint if TLS is not
 ready. Doctor checks the
 issuer, gateway Service and Ingress/certificate permissions.
 
+With `hostTLS: gateway`, the CLI creates neither the Ingress nor a
+certificate. Host routes attach directly to the configured public Gateway,
+whose wildcard listener terminates TLS and must admit routes from the routing
+namespace; `clusterIssuer` is then optional. Routes for `internalHost` attach
+to `internalGatewayName`/`internalGatewayNamespace`, which default to the
+public Gateway.
+
 Browser selection uses [gateway-owned deep links](deep-links.md): `dev up` and
 `dev status` expose URLs, while `dev url` preserves a supplied deep destination.
 Only the branch hostname selects an environment.
@@ -138,6 +152,9 @@ application changes or gateway-wide patches:
 | `X-Dev-Selected` | Normalized environment route key, or `base` for a clear link. Selection intent, **not** proof of overlay use. |
 | `X-Dev-Backend` | Envoy's actual selected upstream hostname, or IP:port when no DNS name is available. |
 | `X-Dev-Proxy-Backend` | On a `publicProxy` route, the outer authentication proxy's upstream instead; any internal `X-Dev-Backend` is preserved. |
+
+Branch-host responses also set `Cache-Control: no-store` and
+`X-Robots-Tag: noindex, nofollow`.
 
 The backend value uses Envoy's native
 [`%UPSTREAM_HOST_NAME%` formatter](https://www.envoyproxy.io/docs/envoy/v1.39.0/configuration/advanced/substitution_formatter).

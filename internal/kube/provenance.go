@@ -8,7 +8,7 @@ func routeHeaderFilters(selection string, public, proxy bool) []any {
 	request["set"] = []any{map[string]any{"name": "x-dev-branch", "value": selection}}
 	set := []any{}
 	if public {
-		set = append(set, map[string]any{"name": "Cache-Control", "value": "no-store"})
+		set = append(set, map[string]any{"name": "Cache-Control", "value": "no-store"}, map[string]any{"name": "X-Robots-Tag", "value": "noindex, nofollow"})
 	}
 	backend := "x-dev-backend"
 	if proxy {

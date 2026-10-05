@@ -125,7 +125,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		fmt.Fprintln(stdout, link)
 		return nil
 	}
-	k := kube.Client{Run: r, Context: cfg.KubeContext, Namespace: cfg.Namespace}
+	k := kube.Client{Run: r, Context: cfg.KubeContext, Namespace: cfg.Namespace, ManifestRoot: cfg.ManifestRoot}
 	bz := bazel.Bazel{Run: r, Args: cfg.BazelArgs}
 	local := localstate.New(root, route)
 	switch args[0] {
@@ -231,6 +231,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		if err != nil {
 			return err
 		}
+		if allDeployables, err = cfg.ApplyOverrides(allDeployables); err != nil {
+			return err
+		}
 		if err := validateDeployables(cfg, allDeployables); err != nil {
 			return err
 		}
@@ -318,7 +321,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			if err := k.WaitRoutes(ctx, route); err != nil {
 				return err
 			}
-			if len(cfg.PublicHosts) > 0 {
+			if len(cfg.PublicHosts) > 0 && cfg.HostTLS != config.HostTLSGateway {
 				name := naming.Resource("tls", route)
 				if err := k.WaitCertificate(ctx, name); err != nil {
 					return fmt.Errorf("branch certificate not ready; inspect kubectl --context %s -n %s describe certificate %s: %w", cfg.KubeContext, cfg.Namespace, name, err)
@@ -434,7 +437,7 @@ func validateDeployables(cfg config.Config, ds []config.Deployable) error {
 			}
 		}
 		if d.WorkloadTemplate != "" && !filepath.IsLocal(d.WorkloadTemplate) {
-			return fmt.Errorf("deployable %s workloadTemplate must be repository-relative", d.Name)
+			return fmt.Errorf("deployable %s workloadTemplate must be relative to the manifest root", d.Name)
 		}
 		if d.SyncRoot != "" && !filepath.IsAbs(d.SyncRoot) {
 			return fmt.Errorf("deployable %s syncRoot must be an absolute container path", d.Name)
@@ -754,15 +757,25 @@ func doctor(ctx context.Context, r execx.Runner, c config.Config, base string, w
 	checks := []struct {
 		name, cmd string
 		args      []string
-	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", []string{"query", c.MetadataQuery, "--output=label", "--noshow_progress"}}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"ingress-class", "kubectl", []string{"--context", c.KubeContext, "get", "ingressclass", c.IngressClass}}, {"gateway-api", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.GatewayName, "--namespace", c.GatewayNamespace}}, {"route-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "httproutes.gateway.networking.k8s.io", "--namespace", c.Namespace}}, {"registry", "curl", []string{"-fsS", "-o", "/dev/null", "https://" + registryHost + "/v2/"}}}
+	}{{"git", "git", []string{"merge-base", base, "HEAD"}}, {"bazel", "bazel", []string{"query", c.MetadataQuery, "--output=label", "--noshow_progress"}}, {"kube-context", "kubectl", []string{"--context", c.KubeContext, "cluster-info"}}, {"gateway-api", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.GatewayName, "--namespace", c.GatewayNamespace}}, {"internal-gateway", "kubectl", []string{"--context", c.KubeContext, "get", "gateway", c.InternalGatewayName, "--namespace", c.InternalGatewayNamespace}}, {"route-rbac", "kubectl", []string{"--context", c.KubeContext, "auth", "can-i", "create", "httproutes.gateway.networking.k8s.io", "--namespace", c.Namespace}}}
 	for _, x := range checks {
 		if _, err := r.Run(ctx, x.cmd, x.args, nil); err != nil {
 			return fmt.Errorf("doctor %s: %w", x.name, err)
 		}
 		fmt.Fprintln(w, "ok", x.name)
 	}
-	if c.ClusterIssuer != "" {
+	// Registries that require token authentication answer 401 at /v2/.
+	code, err := r.Run(ctx, "curl", []string{"-sS", "-o", "/dev/null", "-w", "%{http_code}", "https://" + registryHost + "/v2/"}, nil)
+	if err != nil {
+		return fmt.Errorf("doctor registry: %w", err)
+	}
+	if status := strings.TrimSpace(string(code)); status != "200" && status != "401" {
+		return fmt.Errorf("doctor registry: https://%s/v2/ returned HTTP %s", registryHost, status)
+	}
+	fmt.Fprintln(w, "ok registry")
+	if c.HostTLS == config.HostTLSCertificate {
 		for _, args := range [][]string{
+			{"get", "ingressclass", c.IngressClass},
 			{"auth", "can-i", "create", "ingresses.networking.k8s.io", "--namespace", c.Namespace},
 			{"auth", "can-i", "get", "certificates.cert-manager.io", "--namespace", c.Namespace},
 			{"get", "service", "dev-cli-gateway", "--namespace", c.Namespace},

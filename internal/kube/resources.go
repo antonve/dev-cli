@@ -39,8 +39,8 @@ func substitute(value, route, namespace string, variables map[string]string) (st
 	return rendered, nil
 }
 
-func readObjects(path, route, namespace string, variables map[string]string) ([]map[string]any, error) {
-	b, err := readRepoFile(path)
+func readObjects(root, path, route, namespace string, variables map[string]string) ([]map[string]any, error) {
+	b, err := readManifestFile(root, path)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s: %w", path, err)
 	}
@@ -142,7 +142,7 @@ func (c Client) ensureManaged(ctx context.Context, kind, name, managed, owner, r
 
 func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route string) error {
 	c = c.In(d.Namespace)
-	objects, err := readObjects(d.Manifest, route, d.Namespace, c.Variables)
+	objects, err := readObjects(c.ManifestRoot, d.Manifest, route, d.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
@@ -237,7 +237,7 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 		return nil
 	}
 	c = c.In(d.Namespace)
-	objects, err := readObjects(d.Manifest, route, d.Namespace, c.Variables)
+	objects, err := readObjects(c.ManifestRoot, d.Manifest, route, d.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
@@ -458,7 +458,7 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 	task.Target = target
 	timeout, _ := time.ParseDuration(task.Timeout)
 	c = c.In(task.Namespace)
-	objects, err := readObjects(task.Manifest, route, task.Namespace, c.Variables)
+	objects, err := readObjects(c.ManifestRoot, task.Manifest, route, task.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}

@@ -73,6 +73,9 @@ type Client struct {
 	Run                execx.Runner
 	Context, Namespace string
 	Variables          map[string]string
+	// ManifestRoot confines manifests and workload templates; empty means the
+	// working directory, which is the repository checkout.
+	ManifestRoot string
 }
 
 func (c Client) In(namespace string) Client { c.Namespace = namespace; return c }
@@ -118,11 +121,11 @@ func mergeNamed(values []any, additions ...map[string]any) []any {
 	return values
 }
 
-func loadPodTemplate(path, route, namespace string, variables map[string]string) (map[string]any, error) {
+func loadPodTemplate(root, path, route, namespace string, variables map[string]string) (map[string]any, error) {
 	if path == "" {
 		return map[string]any{}, nil
 	}
-	b, err := readRepoFile(path)
+	b, err := readManifestFile(root, path)
 	if err != nil {
 		return nil, fmt.Errorf("read workload template %s: %w", path, err)
 	}
@@ -141,13 +144,15 @@ func loadPodTemplate(path, route, namespace string, variables map[string]string)
 	return template, nil
 }
 
-func readRepoFile(path string) ([]byte, error) {
+func readManifestFile(root, path string) ([]byte, error) {
 	if !filepath.IsLocal(path) {
-		return nil, fmt.Errorf("path must be repository-relative: %q", path)
+		return nil, fmt.Errorf("path must be relative to the manifest root: %q", path)
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		return nil, err
+	if root == "" {
+		var err error
+		if root, err = os.Getwd(); err != nil {
+			return nil, err
+		}
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -159,7 +164,7 @@ func readRepoFile(path string) ([]byte, error) {
 	}
 	rel, err := filepath.Rel(resolvedRoot, resolved)
 	if err != nil || !filepath.IsLocal(rel) {
-		return nil, fmt.Errorf("path escapes repository: %q", path)
+		return nil, fmt.Errorf("path escapes manifest root: %q", path)
 	}
 	return os.ReadFile(resolved)
 }
@@ -260,7 +265,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		map[string]any{"name": "DEV_BRANCH", "value": branch}, map[string]any{"name": "DEV_REVISION", "value": revision},
 		map[string]any{"name": "DEV_NAMESPACE", "value": c.Namespace}, map[string]any{"name": "DEV_INTERNAL_GATEWAY", "value": cfg.InternalGateway},
 	}
-	template, err := loadPodTemplate(d.WorkloadTemplate, route, c.Namespace, c.Variables)
+	template, err := loadPodTemplate(c.ManifestRoot, d.WorkloadTemplate, route, c.Namespace, c.Variables)
 	if err != nil {
 		return err
 	}
@@ -431,7 +436,7 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 		if d.InternalHost != "" {
 			match := map[string]any{"headers": []any{map[string]any{"name": "x-dev-branch", "type": "Exact", "value": route}}}
 			rules := []any{map[string]any{"matches": []any{match}, "backendRefs": backendRefs, "filters": routeHeaderFilters(route, false, false)}}
-			items = append(items, routeObject(cfg, d, dataRouteName, []any{d.InternalHost}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			items = append(items, routeObject(d, map[string]any{"name": cfg.InternalGatewayName, "namespace": cfg.InternalGatewayNamespace}, dataRouteName, []any{d.InternalHost}, rules, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
 		}
 		if d.PublicPath != "" {
 			publicRefs := backendRefs
@@ -443,14 +448,14 @@ func (c Client) ApplyRoutes(ctx context.Context, cfg config.Config, deployables 
 				"filters":     routeHeaderFilters(route, true, d.Proxy(cfg).Name != ""),
 				"backendRefs": publicRefs,
 			}
-			items = append(items, routeObject(cfg, d, naming.Resource("route-host-"+d.Name, route), []any{route + "." + d.Host(cfg)}, []any{hostRule}, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
+			items = append(items, routeObject(d, map[string]any{"name": cfg.GatewayName, "namespace": cfg.GatewayNamespace}, naming.Resource("route-host-"+d.Name, route), []any{route + "." + d.Host(cfg)}, []any{hostRule}, owner, branch, revision, baseRef, baseRevision, route, expiry, created))
 			legacyRoutes = append(legacyRoutes, publicRouteName)
 		}
 	}
 	if len(items) == 0 {
 		return nil
 	}
-	if len(cfg.PublicHosts) > 0 {
+	if len(cfg.PublicHosts) > 0 && cfg.HostTLS != config.HostTLSGateway {
 		hosts, rules := []any{}, []any{}
 		for _, host := range cfg.PublicHosts {
 			host = route + "." + host
@@ -486,8 +491,8 @@ func (c Client) serviceBackendRefs(cfg config.Config, d config.Deployable, ref c
 	return []any{map[string]any{"group": "gateway.envoyproxy.io", "kind": "Backend", "name": name, "port": ref.Port}}
 }
 
-func routeObject(cfg config.Config, d config.Deployable, name string, hostnames, rules []any, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string) map[string]any {
-	return map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}, "spec": map[string]any{"parentRefs": []any{map[string]any{"name": cfg.GatewayName, "namespace": cfg.GatewayNamespace}}, "hostnames": hostnames, "rules": rules}}
+func routeObject(d config.Deployable, parent map[string]any, name string, hostnames, rules []any, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string) map[string]any {
+	return map[string]any{"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute", "metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)}, "spec": map[string]any{"parentRefs": []any{parent}, "hostnames": hostnames, "rules": rules}}
 }
 
 func (c Client) Pod(ctx context.Context, d config.Deployable, route string) (string, error) {

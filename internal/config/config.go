@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,61 @@ type Config struct {
 	Hooks             Hooks             `json:"hooks"`
 	Variables         map[string]string `json:"variables"`
 	Profiles          []Profile         `json:"profiles"`
+
+	// HostTLS selects who terminates TLS for branch hosts: a per-branch
+	// cert-manager certificate behind an Ingress, or the gateway's own
+	// wildcard listener.
+	HostTLS                  HostTLS                       `json:"hostTLS"`
+	InternalGatewayName      string                        `json:"internalGatewayName"`
+	InternalGatewayNamespace string                        `json:"internalGatewayNamespace"`
+	ManifestsRelativeTo      string                        `json:"manifestsRelativeTo"`
+	Deployables              map[string]DeployableOverride `json:"deployables"`
+
+	// ManifestRoot is the directory manifests and workload templates resolve
+	// against. Empty means the repository checkout.
+	ManifestRoot string `json:"-"`
+}
+
+type HostTLS string
+
+const (
+	HostTLSCertificate HostTLS = "certificate"
+	HostTLSGateway     HostTLS = "gateway"
+)
+
+// DeployableOverride replaces a deployable's environment-specific metadata so
+// one repository can be driven against another environment.
+type DeployableOverride struct {
+	Namespace        string    `json:"namespace"`
+	WorkloadTemplate string    `json:"workloadTemplate"`
+	BaseService      ObjectRef `json:"baseService"`
+	PublicProxy      ObjectRef `json:"publicProxy"`
+	InternalHost     string    `json:"internalHost"`
+	PublicHost       string    `json:"publicHost"`
+}
+
+func (c Config) ApplyOverrides(ds []Deployable) ([]Deployable, error) {
+	known := map[string]bool{}
+	result := make([]Deployable, len(ds))
+	for i, d := range ds {
+		known[d.Name] = true
+		o, ok := c.Deployables[d.Name]
+		if ok {
+			d.Namespace = cmp.Or(o.Namespace, d.Namespace)
+			d.WorkloadTemplate = cmp.Or(o.WorkloadTemplate, d.WorkloadTemplate)
+			d.BaseService = cmp.Or(o.BaseService, d.BaseService)
+			d.PublicProxy = cmp.Or(o.PublicProxy, d.PublicProxy)
+			d.InternalHost = cmp.Or(o.InternalHost, d.InternalHost)
+			d.PublicHost = cmp.Or(o.PublicHost, d.PublicHost)
+		}
+		result[i] = d
+	}
+	for name := range c.Deployables {
+		if !known[name] {
+			return nil, fmt.Errorf("deployables override names unknown deployable %q", name)
+		}
+	}
+	return result, nil
 }
 
 type Hooks struct {
@@ -237,8 +293,30 @@ func Load(path string) (Config, error) {
 	if c.InternalGateway == "" {
 		c.InternalGateway = "http://dev-cli-gateway." + c.Namespace + ".svc.cluster.local"
 	}
-	if c.ClusterIssuer == "" {
+	c.InternalGatewayName = cmp.Or(c.InternalGatewayName, c.GatewayName)
+	c.InternalGatewayNamespace = cmp.Or(c.InternalGatewayNamespace, c.GatewayNamespace)
+	switch c.HostTLS {
+	case "":
+		c.HostTLS = HostTLSCertificate
+	case HostTLSCertificate, HostTLSGateway:
+	default:
+		return Config{}, fmt.Errorf("hostTLS must be certificate or gateway")
+	}
+	if c.HostTLS == HostTLSCertificate && c.ClusterIssuer == "" {
 		return Config{}, fmt.Errorf("clusterIssuer is required: branch hosts are the only branch selection")
+	}
+	switch c.ManifestsRelativeTo {
+	case "", "repository":
+	case "config":
+		dir, err := filepath.Abs(filepath.Dir(path))
+		if err != nil {
+			return Config{}, err
+		}
+		if c.ManifestRoot, err = filepath.EvalSymlinks(dir); err != nil {
+			return Config{}, err
+		}
+	default:
+		return Config{}, fmt.Errorf("manifestsRelativeTo must be repository or config")
 	}
 	if c.TTL == "" {
 		c.TTL = "8h"
