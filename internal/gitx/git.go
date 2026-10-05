@@ -68,3 +68,18 @@ func (g Git) Owner(ctx context.Context) string {
 	}
 	return "unknown"
 }
+
+// Clean reports whether the working tree has no tracked or untracked changes.
+func (g Git) Clean(ctx context.Context) (bool, error) {
+	out, err := g.one(ctx, "status", "--porcelain")
+	return out == "", err
+}
+
+// Pushed fetches origin and reports whether a remote branch contains HEAD.
+func (g Git) Pushed(ctx context.Context) (bool, error) {
+	if _, err := g.one(ctx, "fetch", "origin"); err != nil {
+		return false, err
+	}
+	out, err := g.one(ctx, "branch", "-r", "--contains", "HEAD")
+	return out != "", err
+}

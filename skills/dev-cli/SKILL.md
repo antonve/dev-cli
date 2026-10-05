@@ -9,6 +9,14 @@ Use the repository's `dev` workflow; do not recreate it with manual image pushes
 kubectl copies/restarts, or application-side branch selectors. Gateway deep links
 require dev-cli v0.3.0 or newer and routes created by that version.
 
+## Production mode
+
+A configuration with `mode: production` deploys release images to a shared
+production environment. It is maintainer-only: never run `dev up`, `task`,
+`provision`, `down` or `cleanup` with a production configuration unless the
+maintainer explicitly instructs you to for that specific branch and command.
+Reading `dev status` or `dev doctor` output the maintainer shares is fine.
+
 ## Establish the environment
 
 - Read repository instructions and `.dev/config.yaml` (or legacy `.dev/config.json`).

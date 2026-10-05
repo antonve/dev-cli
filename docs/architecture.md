@@ -37,6 +37,31 @@ selector labels, so a base Service cannot select an overlay. Template
 `${DEV_ROUTE}`, `${DEV_NAMESPACE}` and declared `${DEV_VAR_<NAME>}` values
 are substituted; see Profiles and variables.
 
+## Production mode
+
+`mode: production` replaces the development runtime with release images. The
+configuration must publish to a registry path ending in `/branches`, build with
+`--config=release`, list `refuseChangedPaths`, and override every deployable's
+`workloadTemplate`, so no development template can reach production. Metadata
+supplies `release.imageName` and `release.pushTarget`; the development image,
+push target, command, sync and dependency fields are ignored.
+
+A preflight runs before any build or write for `up`, `task` and `provision`:
+clean working tree, HEAD contained in a fetched `origin` branch, no change under
+a refused prefix, and a routing namespace labelled for production. One push
+guard covers overlays and task images. It allows only `<route>-<commit12>`
+tags, one image name directly under the configured registry, and push targets
+whose `bazel query --output=build` definition sets neither `repository` nor
+`remote_tags`; a release target such as rules_oci `oci_push` with
+`remote_tags` would otherwise still apply `latest` and `prod`.
+
+An existing branch tag is reused because it names a clean, pushed commit. The
+anonymous digest resolution after a push proves the cluster can pull the image
+without a pull Secret. Overlays apply only the digest, labels and annotations to
+the template and wait for rollout status for every kind. `up` never starts the
+heartbeat or watch loop; expiry is creation plus `ttl`, renewed by rerunning
+`up`, and teardown uses the same lifecycle hooks as development.
+
 ## Runtime ownership
 
 Frontend metadata declares a normal repository-owned pnpm dev command. The CLI
