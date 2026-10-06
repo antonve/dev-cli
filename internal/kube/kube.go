@@ -25,7 +25,7 @@ const (
 	RouteLabel     = "dev-cli.io/route"
 	OwnerLabel     = "dev-cli.io/owner"
 	ServiceLabel   = "dev-cli.io/service"
-	CLIVersion     = "v0.10.0"
+	CLIVersion     = "v0.10.1"
 	ownedResources = "deployment,service,configmap,httproute,backends.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io,ingresses.networking.k8s.io"
 )
 

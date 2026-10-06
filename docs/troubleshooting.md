@@ -10,6 +10,10 @@
 - Run `dev doctor` first. It is read-only and checks Git/Bazel, the exact kube
   context, namespace RBAC, ingress class, Gateway API object and route RBAC,
   and registry endpoint.
+- `open bazel-out/...: no such file or directory` right after startup means a
+  CLI older than v0.10.1 on a host whose Bazel creates no `bazel-*` links
+  (`--symlink_prefix=/`). v0.10.1 resolves build outputs against
+  `bazel info execution_root`; upgrade rather than creating the links.
 - A backend build error is non-destructive: fix the source and save again; the
   previous process remains running.
 - A backend that builds but fails readiness is automatically replaced with the

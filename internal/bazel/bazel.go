@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/antonve/dev-cli/internal/config"
 	"github.com/antonve/dev-cli/internal/execx"
@@ -16,6 +17,41 @@ import (
 type Bazel struct {
 	Run  execx.Runner
 	Args []string
+	root *execRoot
+}
+
+// execRoot caches `bazel info execution_root` for one run. It is shared by
+// copies of the Bazel value.
+type execRoot struct {
+	mu  sync.Mutex
+	dir string
+}
+
+func New(run execx.Runner, args []string) Bazel {
+	return Bazel{Run: run, Args: args, root: &execRoot{}}
+}
+
+// outputPath resolves a `cquery --output=files` path. Bazel prints those
+// relative to the execution root, not the workspace, so they must not depend
+// on convenience symlinks such as bazel-out (absent with --symlink_prefix=/).
+func (b Bazel) outputPath(ctx context.Context, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	root := b.root
+	if root == nil {
+		root = &execRoot{}
+	}
+	root.mu.Lock()
+	defer root.mu.Unlock()
+	if root.dir == "" {
+		out, err := b.Run.Run(ctx, "bazel", []string{"info", "execution_root", "--noshow_progress"}, nil)
+		if err != nil {
+			return "", fmt.Errorf("resolve bazel execution root: %w", err)
+		}
+		root.dir = strings.TrimSpace(string(out))
+	}
+	return filepath.Join(root.dir, path), nil
 }
 
 func (b Bazel) args(command string, args ...string) []string {
@@ -104,13 +140,17 @@ func (b Bazel) metadataForTargets(ctx context.Context, selected []string) ([]con
 		if len(files) != 1 {
 			return nil, fmt.Errorf("metadata %s produced %d files", target, len(files))
 		}
-		data, err := os.ReadFile(files[0])
+		path, err := b.outputPath(ctx, files[0])
+		if err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
 		var d config.Deployable
 		if err := json.Unmarshal(data, &d); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", files[0], err)
+			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
 		d.MetadataTarget = target
 		result = append(result, d)
@@ -156,7 +196,7 @@ func (b Bazel) BuildOutput(ctx context.Context, target string) (string, error) {
 	if len(files) != 1 {
 		return "", fmt.Errorf("target %s produced %d files", target, len(files))
 	}
-	return files[0], nil
+	return b.outputPath(ctx, files[0])
 }
 
 func configuredTarget(target string) string { return "config(" + target + ", target)" }
