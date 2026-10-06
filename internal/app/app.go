@@ -125,7 +125,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		return nil
 	}
 	k := kube.Client{Run: r, Context: cfg.KubeContext, Namespace: cfg.Namespace, ManifestRoot: cfg.ManifestRoot}
-	bz := bazel.Bazel{Run: r, Args: cfg.BazelArgs}
+	bz := bazel.New(r, cfg.BazelArgs)
 	local := localstate.New(root, route)
 	switch args[0] {
 	case "doctor":
@@ -577,7 +577,7 @@ func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, rout
 		}
 	}
 	if marker != nil {
-		bz := bazel.Bazel{Run: k.Run, Args: cfg.BazelArgs}
+		bz := bazel.New(k.Run, cfg.BazelArgs)
 		for _, name := range marker.Deployables {
 			if err := runHooks(ctx, k, bz, cfg, marker.Hooks.Deployables[name].AfterStop, marker.Revision, owner, route, w); err != nil {
 				return err
