@@ -30,7 +30,9 @@ Reading `dev status` or `dev doctor` output the maintainer shares is fine.
   require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
   pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer, variables/profiles require v0.7.0
   or newer, and environment overrides, `hostTLS: gateway` and production mode
-  require v0.10.0 or newer. Doctor is a prerequisite check, not an
+  require v0.10.0 or newer. Hosts whose Bazel creates no `bazel-*` links
+  (`--symlink_prefix=/`, as on T3 Code) require v0.10.1 or newer. Doctor is a
+  prerequisite check, not an
   end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
   or registry tokens.
 - If missing, use the supported Go installation, with existing Git credentials
