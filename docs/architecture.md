@@ -154,7 +154,10 @@ the base Service directly. Affected deployables use two Envoy Backend resources:
 the branch Service as the active tier and the base Service as the fallback tier.
 Both reference explicit namespace-local Service DNS names, so deleting the
 branch Service does not invalidate the HTTPRoute's object references. A
-BackendTrafficPolicy checks the declared readiness path every second. Envoy
+BackendTrafficPolicy checks the declared readiness path every second with a
+three-second timeout. Three consecutive failures select the base tier and one
+success restores the branch, so a slow server-rendered first response does not
+fail over, while a hung branch fails over within about twelve seconds. Envoy
 refreshes these temporary Service DNS records every second without retaining
 the cluster DNS TTL, so a recreated Service does not leave a stale address for
 the default thirty-second refresh interval. Envoy

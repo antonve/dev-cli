@@ -7,6 +7,17 @@ import (
 	"github.com/antonve/dev-cli/internal/naming"
 )
 
+// Server-rendered pages can take over a second right after start, so one slow
+// response must not fail traffic over to base. A hung branch still fails over
+// within healthUnhealthyThreshold * (healthTimeout + healthInterval), about 12
+// seconds; a refused connection fails each check immediately.
+const (
+	healthInterval           = "1s"
+	healthTimeout            = "3s"
+	healthUnhealthyThreshold = 3
+	healthHealthyThreshold   = 1
+)
+
 // Envoy owns health-based selection, including while the CLI is disconnected.
 // Both endpoints use DNS so deleting an overlay Service does not invalidate
 // the HTTPRoute's Backend object references.
@@ -35,9 +46,16 @@ func (c Client) failoverResources(cfg config.Config, d config.Deployable, routeN
 		"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "BackendTrafficPolicy",
 		"metadata": map[string]any{"name": name, "labels": labels(owner, route, d.Name), "annotations": annotations(owner, branch, revision, baseRef, baseRevision, "", expiry, created)},
 		"spec": map[string]any{
-			"dns":         map[string]any{"dnsRefreshRate": "1s", "respectDnsTtl": false},
-			"targetRefs":  targetRefs,
-			"healthCheck": map[string]any{"active": map[string]any{"type": "HTTP", "interval": "1s", "timeout": "1s", "healthyThreshold": 1, "unhealthyThreshold": 1, "http": map[string]any{"path": d.ReadinessPath}}},
+			"dns":        map[string]any{"dnsRefreshRate": "1s", "respectDnsTtl": false},
+			"targetRefs": targetRefs,
+			"healthCheck": map[string]any{"active": map[string]any{
+				"type":               "HTTP",
+				"interval":           healthInterval,
+				"timeout":            healthTimeout,
+				"healthyThreshold":   healthHealthyThreshold,
+				"unhealthyThreshold": healthUnhealthyThreshold,
+				"http":               map[string]any{"path": d.ReadinessPath},
+			}},
 		},
 	})
 	return items, refs
