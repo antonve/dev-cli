@@ -146,6 +146,7 @@ func productionFixture(t *testing.T, tagExists bool) (*productionRunner, string,
 		"namespace":           "ns",
 		"registry":            registry,
 		"hostTLS":             "gateway",
+		"ingressHost":         "preview.example.test",
 		"bazelArgs":           []string{"--config=release"},
 		"refuseChangedPaths":  []string{"services/api/migrations/"},
 		"manifestsRelativeTo": "config",
@@ -243,6 +244,11 @@ func TestProductionUpReusesAnExistingCommitTag(t *testing.T) {
 	assertReleaseOverlay(t, r, route, registry+"/worker@sha256:abc")
 	if !strings.Contains(out.String(), "expires=") || !strings.Contains(out.String(), "commit=0123456789abcdef") {
 		t.Fatalf("summary lacks commit or expiry: %s", out.String())
+	}
+	// Production base hosts are parents of the branch hosts, not sites, so there is no base to open.
+	if !strings.Contains(out.String(), "Open environment: https://"+route+".preview.example.test/") ||
+		strings.Contains(out.String(), "Open base") {
+		t.Fatalf("summary links: %s", out.String())
 	}
 }
 

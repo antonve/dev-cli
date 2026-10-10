@@ -348,15 +348,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 				return err
 			}
 		}
+		if err := gateway.wait(ctx, gatewayProbes(cfg, ds, route), func(s string) { fmt.Fprintln(stdout, s) }); err != nil {
+			return err
+		}
+		// Production hosts only parent the branch hosts; they serve no base site.
 		if cfg.IngressHost != "" {
-			fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
+			fmt.Fprintf(stdout, "Open environment: %s\n", openURL)
+			if !production {
+				fmt.Fprintf(stdout, "Open base: %s\n", baseURL)
+			}
 		}
 		for _, host := range cfg.PublicHosts {
 			if host == cfg.IngressHost {
 				continue
 			}
 			link, _ := deeplink.HostURL(host, route, "/")
-			fmt.Fprintf(stdout, "Open environment (%s): %s\nOpen base (%s): https://%s/\n", host, link, host, host)
+			fmt.Fprintf(stdout, "Open environment (%s): %s\n", host, link)
+			if !production {
+				fmt.Fprintf(stdout, "Open base (%s): https://%s/\n", host, host)
+			}
 		}
 		if production {
 			fmt.Fprintf(stdout, "route=%s commit=%s expires=%s\n", route, rev, expiry.UTC().Format(time.RFC3339))

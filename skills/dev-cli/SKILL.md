@@ -116,9 +116,11 @@ retires only that owner/route's old public selection rules. Use the new links.
 
 ## Prove the result and hand off
 
-Confirm the affected service list before calling startup successful. Check
-readiness and route admission, then actual application responses: a healthy
-HTTPRoute alone does not prove which workload served the request. For partial
+Confirm the affected service list before calling startup successful. Startup
+already waits until each direct public host answers from the branch Service;
+`publicProxy` and internal routes are not checked, so verify their actual
+application responses: a healthy HTTPRoute alone does not prove which workload
+served the request. For partial
 overlays verify each service independently falls back to base; internal calls
 still need the application's existing normalized-header propagation through the
 gateway. Do not promise transparent backend context propagation.
