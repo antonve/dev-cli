@@ -166,9 +166,18 @@ is stopped. Failover is eventual, not a zero-error guarantee: health checks,
 DNS, and data-plane configuration take time to converge.
 
 The CLI waits for current-generation HTTPRoute Accepted and ResolvedRefs
-conditions before declaring startup complete. Route admission is reported
-separately from workload readiness; it is not proof that an individual request
-used the overlay. The response headers below provide per-request gateway evidence.
+conditions, then for the gateway itself to serve each selected deployable's
+direct public host route from the branch. It requests
+`https://<route>.<publicHost><readinessPath>` (the `publicPath` when the
+readiness path lies outside it) from the operator's machine, without following
+redirects, until three consecutive responses below HTTP 500 carry the overlay
+Service's DNS name in `X-Dev-Backend`. Only then does it print the environment
+links. After three minutes without that, `up` fails with the URL, the expected
+backend and the last response or `X-Dev-Backend` it saw, and leaves every
+resource in place. Workers, internal-only `internalHost` routes and
+`publicProxy` deployables are not probed: the internal gateway is not reachable
+from the operator's machine, and a proxy's own rules decide which paths reach
+the application. Their branch selection still follows the same health policy.
 
 ### Response provenance
 

@@ -348,6 +348,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 				return err
 			}
 		}
+		if err := gateway.wait(ctx, gatewayProbes(cfg, ds, route), func(s string) { fmt.Fprintln(stdout, s) }); err != nil {
+			return err
+		}
 		if cfg.IngressHost != "" {
 			fmt.Fprintf(stdout, "Open environment: %s\nOpen base: %s\n", openURL, baseURL)
 		}

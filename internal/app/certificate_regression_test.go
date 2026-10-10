@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/antonve/dev-cli/internal/naming"
 )
 
 type certificateRunner struct {
@@ -71,6 +73,10 @@ func TestUpWaitsForCertificateCreationAndReadiness(t *testing.T) {
 			if err := os.WriteFile("metadata.json", []byte(`{"name":"api","kind":"backend","containerPath":"/app/api","imageName":"api","pushTarget":"//:push","buildTarget":"//:api","publicPath":"/","port":8000,"readinessPath":"/readyz"}`), 0600); err != nil {
 				t.Fatal(err)
 			}
+			overlay := naming.Resource("api", naming.RouteKey("alice", "feature/hooks")) + ".ns.svc.cluster.local"
+			previousGateway := gateway
+			gateway = testWaiter(gatewayServer(t, func(w http.ResponseWriter, _ *http.Request) { w.Header().Set("X-Dev-Backend", overlay) }))
+			t.Cleanup(func() { gateway = previousGateway })
 			r := &certificateRunner{lifecycleRunner: base}
 			var output bytes.Buffer
 			err := run(context.Background(), []string{"up", "--config", "config.json", "--owner", "alice", "--no-watch"}, &output, &output, r)

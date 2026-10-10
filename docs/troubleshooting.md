@@ -7,6 +7,15 @@
   then rerun up. Certificate and Secret cleanup
   requires cert-manager's `--enable-certificate-owner-ref=true` setting.
 
+- `gateway did not serve <url> from branch backend <host>` means the overlay
+  rolled out but Envoy kept answering from another upstream for three minutes.
+  The reported `X-Dev-Backend` names it: the base Service means the branch
+  fails its active health check (a readiness path slower than three seconds,
+  a non-200 response, or a crash; check `dev logs <service>` and the
+  `route-<service>-dev-<route>` BackendTrafficPolicy); no header means the
+  request did not reach the branch host route. The operator's machine must
+  resolve and trust the branch host. Nothing is torn down; rerun `dev up` or
+  `dev down`.
 - Run `dev doctor` first. It is read-only and checks Git/Bazel, the exact kube
   context, namespace RBAC, ingress class, Gateway API object and route RBAC,
   and registry endpoint.

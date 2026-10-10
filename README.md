@@ -51,6 +51,9 @@ upgrade instructions.
 
 CLI-routed responses report `X-Dev-Selected` and Envoy's actual upstream in
 `X-Dev-Backend`, so an overlay selection can be distinguished from base fallback.
+Before printing environment links, `up` polls each selected direct public host
+until three consecutive responses come from the branch Service, and fails after
+three minutes naming the host and the backend that answered.
 Authentication proxy hops use a separate `X-Dev-Proxy-Backend` header. See
 [response provenance](docs/architecture.md#response-provenance) for error,
 internal-hop and uninstrumented-base limitations.

@@ -192,5 +192,7 @@ Stop an older CLI before upgrading; v0.2.0 does not signal legacy PID files.
 
 The affected service set is selected at startup. If development expands to
 another service, stop and rerun `dev up` to select the new set. On startup,
-workload readiness and HTTPRoute admission are checked; allow DNS/health-check
-convergence before asserting which tier handled a request.
+workload readiness, HTTPRoute admission and, for direct public host routes,
+`X-Dev-Backend` from the branch Service are checked. Proxied and internal
+routes still need their own response check before asserting which tier handled
+a request.
