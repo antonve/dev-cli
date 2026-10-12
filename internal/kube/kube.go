@@ -255,12 +255,41 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 	if existing, err := c.RunKubectl(ctx, []string{"get", "deployment", name, "-o", "jsonpath={.metadata.annotations.dev-cli\\.io/created-at}"}, nil); err == nil && strings.TrimSpace(string(existing)) != "" {
 		created = strings.TrimSpace(string(existing))
 	}
+	items, err := c.overlayObjects(cfg, d, image, owner, branch, revision, baseRef, baseRevision, route, expiry, created)
+	if err != nil {
+		return err
+	}
+	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
+		return err
+	}
+	if cfg.Mode == config.ModeProduction {
+		_, err := c.RunKubectl(ctx, []string{"rollout", "status", "deployment/" + name, "--timeout=5m"}, nil)
+		return err
+	}
+	if d.Kind == "frontend" {
+		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		selector := RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
+		// Deployment creation can return before its ReplicaSet creates a Pod.
+		if _, err := c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=create", "--timeout=90s"}, nil); err != nil {
+			return err
+		}
+		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
+		return err
+	}
+	return c.WaitOverlay(ctx, d, route)
+}
+
+// overlayObjects builds the Deployment, Service and runtime ConfigMap of one
+// overlay in the client's namespace without contacting the cluster.
+func (c Client) overlayObjects(cfg config.Config, d config.Deployable, image, owner, branch, revision, baseRef, baseRevision, route string, expiry time.Time, created string) ([]any, error) {
+	name := naming.Resource(d.Name, route)
 	ann, lbl := annotations(owner, branch, revision, baseRef, baseRevision, image, expiry, created), labels(owner, route, d.Name)
 	ann["dev-cli.io/dev-container"] = d.Container()
 	ann["dev-cli.io/kind"] = d.Kind
 	template, err := loadPodTemplate(c.ManifestRoot, d.WorkloadTemplate, route, c.Namespace, c.Variables)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	metadata, _ := template["metadata"].(map[string]any)
 	podSpec, _ := template["spec"].(map[string]any)
@@ -270,7 +299,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		podSpec = stringMap(podSpec)
 	}
 	if _, exists := podSpec["initContainers"]; exists {
-		return fmt.Errorf("workload template %s contains initContainers; declare migrations/seeds as tasks", d.WorkloadTemplate)
+		return nil, fmt.Errorf("workload template %s contains initContainers; declare migrations/seeds as tasks", d.WorkloadTemplate)
 	}
 	containers, _ := podSpec["containers"].([]any)
 	containerName := d.Container()
@@ -283,7 +312,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		}
 	}
 	if d.WorkloadTemplate != "" && containerIndex < 0 {
-		return fmt.Errorf("workload template %s has no designated dev container %q", d.WorkloadTemplate, containerName)
+		return nil, fmt.Errorf("workload template %s has no designated dev container %q", d.WorkloadTemplate, containerName)
 	}
 	app := map[string]any{"name": containerName}
 	if containerIndex >= 0 {
@@ -294,7 +323,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		// Release images run unchanged: distroless images have no shell for a
 		// supervisor, and the template already carries the base runtime.
 		if d.WorkloadTemplate == "" {
-			return fmt.Errorf("production overlay %s requires a workload template", d.Name)
+			return nil, fmt.Errorf("production overlay %s requires a workload template", d.Name)
 		}
 		app["image"], app["imagePullPolicy"] = image, "IfNotPresent"
 	} else {
@@ -328,25 +357,7 @@ func (c Client) ApplyOverlay(ctx context.Context, cfg config.Config, d config.De
 		svc := map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": name, "labels": lbl, "annotations": ann}, "spec": map[string]any{"selector": map[string]any{RouteLabel: route, ServiceLabel: d.Name}, "ports": []any{map[string]any{"name": "http", "port": d.OverlayPort(), "targetPort": d.Port}}}}
 		items = append(items, svc)
 	}
-	if err := c.writeOwnedObjects(ctx, items, owner, route); err != nil {
-		return err
-	}
-	if cfg.Mode == config.ModeProduction {
-		_, err := c.RunKubectl(ctx, []string{"rollout", "status", "deployment/" + name, "--timeout=5m"}, nil)
-		return err
-	}
-	if d.Kind == "frontend" {
-		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-		selector := RouteLabel + "=" + route + "," + ServiceLabel + "=" + d.Name
-		// Deployment creation can return before its ReplicaSet creates a Pod.
-		if _, err := c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=create", "--timeout=90s"}, nil); err != nil {
-			return err
-		}
-		_, err = c.RunKubectl(ctx, []string{"wait", "pod", "-l", selector, "--for=jsonpath={.status.phase}=Running", "--timeout=90s"}, nil)
-		return err
-	}
-	return c.WaitOverlay(ctx, d, route)
+	return items, nil
 }
 
 // developmentRuntime adds the CLI's live-update runtime to the designated
