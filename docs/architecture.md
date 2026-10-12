@@ -55,6 +55,10 @@ whose `bazel query --output=build` definition sets neither `repository` nor
 `remote_tags`; a release target such as rules_oci `oci_push` with
 `remote_tags` would otherwise still apply `latest` and `prod`.
 
+After the preflight and deployable selection, `up` runs the capacity check
+described in the README before writing the lifecycle marker; a refusal leaves
+the cluster unchanged. It applies in development mode too.
+
 An existing branch tag is reused because it names a clean, pushed commit. The
 anonymous digest resolution after a push proves the cluster can pull the image
 without a pull Secret. Overlays apply only the digest, labels and annotations to
@@ -282,7 +286,8 @@ before startup. Hook Jobs use the same publication, task target Lease, timeout,
 namespace and ownership boundaries as `dev task`.
 
 Startup first cleans up expired routes and selects deployables. With no
-selection it exits without hooks. Otherwise it writes a labelled lifecycle
+selection it exits without hooks. Otherwise it checks cluster capacity, then
+writes a labelled lifecycle
 ConfigMap in the routing namespace, provisions explicit dependencies, runs
 `beforeUp`, then explicit tasks, publishes images, and runs each deployable's
 `beforeStart` immediately before creating or replacing its overlay. Routing,

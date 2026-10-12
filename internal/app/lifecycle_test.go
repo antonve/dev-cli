@@ -27,6 +27,8 @@ type lifecycleRunner struct {
 	failWait    bool
 	stopOverlay bool
 	expiry      string
+	// nodes and pods answer the capacity check; empty means one roomy node.
+	nodes, pods string
 }
 
 func (r *lifecycleRunner) Stream(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
@@ -62,6 +64,15 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 	}
 	ns, verb := args[3], args[4]
 	key := func(kind, name string) string { return ns + "/" + strings.ToLower(kind) + "/" + name }
+	if verb == "get" && args[5] == "nodes" {
+		if r.nodes == "" {
+			return []byte(`{"items":[{"metadata":{"name":"node"},"status":{"allocatable":{"cpu":"4","memory":"16Gi"}}}]}`), nil
+		}
+		return []byte(r.nodes), nil
+	}
+	if verb == "get" && args[5] == "pods" && args[6] == "--all-namespaces" {
+		return []byte(`{"items":[` + r.pods + `]}`), nil
+	}
 	if verb == "get" {
 		if args[5] == "deployments" || args[5] == "httproutes" || strings.Contains(args[5], ",") {
 			items := []json.RawMessage{}

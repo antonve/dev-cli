@@ -16,6 +16,11 @@
   request did not reach the branch host route. The operator's machine must
   resolve and trust the branch host. Nothing is torn down; rerun `dev up` or
   `dev down`.
+- `insufficient cluster capacity` means a selected overlay pod fits on no
+  schedulable node beside the current requests. Nothing was changed. The output
+  lists each pod's needs and each node's free CPU and memory; free room by
+  tearing down another route, lowering template requests, or adding a node,
+  then rerun. `dev capacity` repeats the check without deploying.
 - Run `dev doctor` first. It is read-only and checks Git/Bazel, the exact kube
   context, namespace RBAC, ingress class, Gateway API object and route RBAC,
   and registry endpoint.

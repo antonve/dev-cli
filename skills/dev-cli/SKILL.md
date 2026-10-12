@@ -53,6 +53,11 @@ conservatively select all deployables. If adding another service later, stop and
 rerun the loop with repeatable `--service <name>`; do not claim automatic
 expansion or infer related services.
 
+Startup refuses with `insufficient cluster capacity` before any change when a
+selected overlay pod fits on no schedulable node; report the printed needs and
+free room to the user instead of retrying. `dev capacity` with the same
+`--service` flags repeats that check read-only.
+
 Read declared lifecycle hooks before startup: `beforeUp` runs before explicit
 tasks and publication; `beforeStart` runs before its overlay Deployment.
 Hook failures stop startup and preserve a marker for cleanup. Hooks must be

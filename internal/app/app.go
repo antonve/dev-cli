@@ -51,7 +51,7 @@ func flags(name string) (*flag.FlagSet, *common) {
 	return f, c
 }
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: dev <doctor|up|provision|task|url|status|logs|down|cleanup|version> [options]")
+	fmt.Fprintln(w, "usage: dev <doctor|up|capacity|provision|task|url|status|logs|down|cleanup|version> [options]")
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -82,9 +82,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 	if args[0] == "url" {
 		f.StringVar(&urlHost, "host", "", "configured public host")
 	}
+	if args[0] == "up" || args[0] == "capacity" {
+		f.Var(&selectedServices, "service", "explicitly include an unchanged service (repeatable)")
+	}
 	if args[0] == "up" {
 		f.BoolVar(&noWatch, "no-watch", false, "create and initially sync overlays, then exit")
-		f.Var(&selectedServices, "service", "explicitly include an unchanged service (repeatable)")
 		f.Var(&selectedDependencies, "dependency", "provision a declared dependency (repeatable)")
 		f.Var(&selectedTasks, "task", "run a declared task before startup (repeatable)")
 	}
@@ -187,6 +189,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			return err
 		}
 		return runTask(ctx, k, bz, cfg, f.Arg(0), rev, c.owner, route, stdout)
+	case "capacity":
+		merge, err := g.MergeBase(ctx, c.base)
+		if err != nil {
+			return err
+		}
+		changed, err := g.Changed(ctx, merge)
+		if err != nil {
+			return err
+		}
+		cfg, _ = cfg.ForPaths(changed)
+		k.Variables = cfg.ResolveVariables(route, cfg.Namespace)
+		_, ds, err := deployables(ctx, bz, cfg, changed, selectedServices)
+		if err != nil {
+			return err
+		}
+		if len(ds) == 0 {
+			fmt.Fprintln(stdout, "no affected deployables")
+			return nil
+		}
+		rev, err := g.Revision(ctx)
+		if err != nil {
+			return err
+		}
+		return k.CheckCapacity(ctx, cfg, ds, rev, route, stdout)
 	case "up":
 		if err := preflight(ctx, g, k, cfg, c.base); err != nil {
 			return err
@@ -232,32 +258,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			return fmt.Errorf("route %s has different recorded variables; run dev down first", route)
 		}
 		k.Variables = resolvedVariables
-		ds, err := bz.Metadata(ctx, cfg.MetadataQuery, changed)
+		allDeployables, ds, err := deployables(ctx, bz, cfg, changed, selectedServices)
 		if err != nil {
 			return err
 		}
-		allDeployables, err := bz.AllMetadata(ctx, cfg.MetadataQuery)
-		if err != nil {
-			return err
-		}
-		if allDeployables, err = cfg.ApplyOverrides(allDeployables); err != nil {
-			return err
-		}
-		if err := validateDeployables(cfg, allDeployables); err != nil {
-			return err
-		}
-		for _, name := range selectedServices {
-			if _, ok := findDeployable(allDeployables, name); !ok {
-				return fmt.Errorf("unknown service %q", name)
-			}
-		}
-		ds = selectDeployables(allDeployables, ds, selectedServices)
 		if len(ds) == 0 {
 			fmt.Fprintln(stdout, "no affected deployables")
 			return nil
 		}
 		rev, err := g.Revision(ctx)
 		if err != nil {
+			return err
+		}
+		if err := k.CheckCapacity(ctx, cfg, ds, rev, route, stdout); err != nil {
 			return err
 		}
 		ttl, err := time.ParseDuration(cfg.TTL)
@@ -382,6 +395,32 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		usage(stderr)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// deployables returns every deployable with its environment overrides and the
+// ones up deploys: those affected by changed, the explicit services and their
+// selection groups.
+func deployables(ctx context.Context, bz bazel.Bazel, cfg config.Config, changed, services []string) ([]config.Deployable, []config.Deployable, error) {
+	affected, err := bz.Metadata(ctx, cfg.MetadataQuery, changed)
+	if err != nil {
+		return nil, nil, err
+	}
+	all, err := bz.AllMetadata(ctx, cfg.MetadataQuery)
+	if err != nil {
+		return nil, nil, err
+	}
+	if all, err = cfg.ApplyOverrides(all); err != nil {
+		return nil, nil, err
+	}
+	if err := validateDeployables(cfg, all); err != nil {
+		return nil, nil, err
+	}
+	for _, name := range services {
+		if _, ok := findDeployable(all, name); !ok {
+			return nil, nil, fmt.Errorf("unknown service %q", name)
+		}
+	}
+	return all, selectDeployables(all, affected, services), nil
 }
 
 func findDeployable(ds []config.Deployable, name string) (config.Deployable, bool) {

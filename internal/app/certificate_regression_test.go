@@ -46,7 +46,7 @@ func (r *certificateRunner) Run(ctx context.Context, command string, args []stri
 			r.ready = true
 			return nil, nil
 		}
-		if args[4] == "get" && args[5] == "pods" {
+		if args[4] == "get" && args[5] == "pods" && args[6] != "--all-namespaces" {
 			return nil, errors.New("sync boundary")
 		}
 	}

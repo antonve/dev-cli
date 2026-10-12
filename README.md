@@ -23,6 +23,7 @@ dev up                         # compare with merge-base(origin/main, HEAD)
 dev up --base origin/other     # explicit comparison base
 dev up --service unchanged-api # explicitly add an unchanged deployable
 dev up --dependency branch-db --task migrate
+dev capacity --service api     # read-only: would up's pods fit the cluster?
 dev provision branch-db       # explicit, on-demand dependency
 dev task migrate              # serialized repository-owned Job
 dev url '/settings?tab=profile' # clickable branch link; no cluster mutation
@@ -74,6 +75,30 @@ security model, lifecycle, and recovery behavior.
 [Installation and onboarding](docs/installation.md) covers private-module
 credentials and the target repository contract. [Contributing](docs/contributing.md)
 describes the local build and release gates.
+
+## Capacity check
+
+Every `up` checks cluster capacity after selecting deployables and before it
+writes the lifecycle marker, runs hooks, publishes images or applies overlays.
+It builds each overlay Deployment exactly as `up` would and needs the pod's
+CPU and memory requests (the larger of its containers' sum and its largest init
+container) once per replica. Free room per node is allocatable minus the
+requests of every pod on it that has not succeeded or failed. Cordoned nodes,
+nodes whose `NoSchedule` or `NoExecute` taints the pod does not tolerate, and
+nodes that miss its `nodeSelector` are skipped. Pods are placed first-fit,
+largest first, so a pod must fit on one node, not in the cluster total. An
+overlay already running the same commit and CLI version is not rolled and needs
+nothing; any other existing overlay rolls with a surge pod, so its old pod's
+room is released only after the replacement is placed. When a pod does not fit
+`up` refuses before any change and prints each pod's needs and each node's
+free CPU and memory.
+
+`dev capacity` accepts the same `--service` selection as `up`, prints the same
+computation and exits non-zero when it does not fit. It only reads nodes and
+pods. The check is on in every mode and has no branch-count limit; it needs
+`get`/`list` on nodes and `list` on pods in all namespaces. Task Job pods,
+affinity and topology spread are not modelled, and nothing is reserved, so
+two concurrent `up` runs can still race for the same room.
 
 ## Environment overrides
 
