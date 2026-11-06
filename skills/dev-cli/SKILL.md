@@ -99,8 +99,8 @@ base URL plus workload and sync health. Never ask the user to copy a route
 key anywhere.
 
 Each branch is its own browser origin, so several can be open in one profile.
-Links don't log anyone in or grant access, and the user still needs lab
-network, DNS and CA access.
+Links don't log anyone in or grant access. The user still needs network
+access to the cluster, DNS for the branch hosts, and trust in their CA.
 
 ## Verify
 

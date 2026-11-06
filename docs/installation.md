@@ -47,11 +47,11 @@ repositories. If both exist, you must pick one with `--config <path>`. An
 explicit path can have any filename.
 
 ```yaml
-kubeContext: homelab-dev
-clusterIssuer: lab-ca-acme
+kubeContext: dev-cluster
+clusterIssuer: internal-ca
 namespace: dev-cli-playground
-registry: registry.dev.lab/dev-cli-playground
-ingressHost: dev-cli-playground.dev.lab
+registry: registry.dev.example/dev-cli-playground
+ingressHost: dev-cli-playground.dev.example
 gatewayNamespace: envoy-gateway-system
 ```
 
