@@ -5,7 +5,7 @@ without deploying the whole stack. Run `dev up` and it:
 
 1. works out which services your branch changed,
 2. deploys only those, next to the normal shared deployment (the "base"),
-3. gives you a branch URL such as `https://alice-my-feature-1a2b3c4d.app.dev.lab/`,
+3. gives you a branch URL such as `https://alice-my-feature-1a2b3c4d.app.dev.example/`,
 4. keeps those services updated as you edit.
 
 Requests to services you didn't change go to the base, so your branch behaves

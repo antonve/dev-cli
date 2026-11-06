@@ -7,7 +7,8 @@ the only thing that selects a branch. There are no cookies or headers to set,
 so one browser profile can have several branches open at once.
 
 Links don't log you in or grant access. Application login stays with the
-application, and you still need network, DNS and CA access to the lab.
+application. Users still need network access to the cluster, DNS for the
+branch hosts, and trust in the CA that issued their certificates.
 
 ## Getting a link
 
@@ -20,7 +21,7 @@ start anything or call Kubernetes:
 
 ```sh
 dev url --owner alice '/settings?tab=profile#details'
-dev url --owner alice --host account.dev.lab '/settings'
+dev url --owner alice --host account.dev.example '/settings'
 ```
 
 - Flags go before the path.
