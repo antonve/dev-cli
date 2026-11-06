@@ -1,45 +1,56 @@
-# Branch-host links
+# Branch links
 
-v0.9.0 requires `clusterIssuer`, for example `lab-ca-acme`. Each public host
-gets `https://<route>.<publicHost>/`; the route includes the owner and branch.
-Branches have independent browser origins, so one profile can open multiple
-owners without selecting or clearing a routing cookie. Application login cookies
-remain application-owned; links do not authenticate or grant access.
+Every branch environment has its own hostname for each public host:
+`https://<route>.<publicHost>/`. The route is built from the owner and branch,
+so two people on the same branch name get different links. The hostname is
+the only thing that selects a branch. There are no cookies or headers to set,
+so one browser profile can have several branches open at once.
+
+Links don't log you in or grant access. Application login stays with the
+application, and you still need network, DNS and CA access to the lab.
+
+## Getting a link
+
+`dev up` prints branch links and plain base links once the environment is
+ready. `dev status` shows them too: `url` and `baseURL` for the primary host,
+plus `urls` and `baseURLs` for every host.
+
+`dev url` builds a link to a specific page. It only prints a link; it doesn't
+start anything or call Kubernetes:
 
 ```sh
-dev up --owner alice
 dev url --owner alice '/settings?tab=profile#details'
 dev url --owner alice --host account.dev.lab '/settings'
 ```
 
-Flags precede the root-relative destination. The configured `publicHosts` are
-an allowlist for `--host`; DNS names must leave room for a 47-character route
-label. External destinations, malformed queries and non-root-relative paths
-are rejected. Ordinary query parameters, duplicate values and fragments are
-preserved. `dev url` only formats a link; it does not start an environment or
-make Kubernetes calls.
+- Flags go before the path.
+- The path must start with `/`. Full external URLs are rejected.
+- Query parameters (including repeated ones) and fragments are kept.
+- `--host` must be one of the configured `publicHosts`.
+- Quote paths containing `?`, `&` or `#`.
 
-Up prints branch and plain base links after initial sync, route admission and
-certificate readiness. Status exposes primary `url`/`baseURL` and per-host
-`urls`/`baseURLs`; base links are ordinary `https://<publicHost>/` URLs.
-An unavailable certificate fails startup with an exact describe command. Owned
-resources remain available for diagnosis and `dev down`. Trust the issuing CA.
+Public host names must leave room for a 47-character route label.
 
-Public HTTPRoutes match the branch hostname and path, replace client branch
-context with the route key, and preserve `Cache-Control: no-store`. Proxy routes
-retain the real authentication proxy. Direct routes keep independent active/base
-failover; internal requests still need the application's normalized header
-propagation through the gateway. Platform base routes must strip forged branch
-headers. Deleted hosts return 404; an unknown host never creates an environment.
+## What the gateway does
 
-Down and expiry remove the owned Ingress. cert-manager must enable certificate
-owner references so the Certificate and Secret are removed with it.
+- Public routes match the branch hostname and path, and set the branch header
+  to the route key, overwriting anything the client sent.
+- Branch hosts send `Cache-Control: no-store`.
+- `publicProxy` routes still go through the real authentication proxy.
+- A host for a deleted environment returns 404. An unknown host never creates
+  an environment.
 
-## Upgrade existing environments
+See [routing](architecture.md#routing) for TLS modes, failover and internal
+calls.
 
-Stop the older CLI loop first. Add `clusterIssuer` and remove any legacy
-`cookieName` config key; configuration rejects unknown fields. Environments
-created by v0.6–v0.8 retain their cookie routes until rerun with v0.9.0 or torn
-down. Rerunning up replaces branch-host routes and deletes only the same
-owner/route's legacy public selection HTTPRoutes. Use the newly printed URLs;
-old base-host selection links and the `--cookie`/`--clear` flags are retired.
+## Upgrading from v0.6–v0.8
+
+Those versions selected branches with a cookie.
+
+1. Stop the old `dev up` loop.
+2. Add `clusterIssuer` (or set `hostTLS: gateway`) and remove `cookieName`
+   from the config.
+3. Rerun `dev up`, or run `dev down`, with the new CLI. This replaces only your
+   own route's old cookie routes.
+4. Use the newly printed links. Old cookie links and the `--cookie`/`--clear`
+   flags no longer exist.

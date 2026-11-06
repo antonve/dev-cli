@@ -1,27 +1,20 @@
-# Installation and repository onboarding
+# Installation and onboarding
 
-The CLI is a normal Go module, supported on Linux and macOS. Building or
-installing it does not require Bazel. Go 1.24 or later is required.
+## Install the CLI
 
-```sh
-go install github.com/antonve/dev-cli/cmd/dev@latest
-dev version
-```
+You need Go 1.24 or later on Linux or macOS. Bazel is not needed for the CLI
+itself.
 
-This repository is private. Your Git credentials must already grant read
-access, and Go must bypass public module proxies for this module. For example:
+The module is private, so Go must skip the public module proxy for it, and
+your Git credentials need read access:
 
 ```sh
 export GOPRIVATE=github.com/antonve/dev-cli
 go install github.com/antonve/dev-cli/cmd/dev@latest
+dev version
 ```
 
-Include your Go binary directory (`go env GOPATH`, followed by `/bin`, unless
-GOBIN is configured) in PATH. Never put a token in a repository URL or commit
-credentials. Existing SSH or an authenticated Git credential helper is enough.
-
-For an existing SSH-only GitHub setup, use per-command URL rewriting (no new
-token or global Git configuration is needed):
+If GitHub access only works over SSH, rewrite the URL for this one command:
 
 ```sh
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf \
@@ -29,37 +22,29 @@ GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/antonve/dev-cli \
 go install github.com/antonve/dev-cli/cmd/dev@latest
 ```
 
-Check `command -v dev` after installing: an older binary earlier in PATH can
-hide the new one. To update an existing user-local installation deliberately,
-set `GOBIN="$HOME/.local/bin"` on that same install command. Stop your own active
-loops before upgrading; do not stop other developers' loops. v0.7.0 adds variables and path-selected profiles; v0.6.0 adds task-backed
-lifecycle hooks and retryable teardown. v0.5.0 adds route-free `worker` deployables and `selectionGroup` pairing. v0.4.0 introduced
-YAML configuration, multi-host/namespace workflows, dependency/tasks, upstream
-diagnostic headers and cold frontend Pod-creation waiting.
+Make sure `$(go env GOPATH)/bin` (or `GOBIN`) is on your `PATH`, and check
+`command -v dev`: an older binary earlier on `PATH` can hide the new one. To
+install somewhere specific, add `GOBIN="$HOME/.local/bin"` to the install
+command. Never put a token in a repository URL.
 
-## Target repository contract
+**Before upgrading**, stop your own running `dev up` loops (not anyone
+else's).
 
-The target repository needs Git, its pinned Bazel version, kubectl, access to
-the configured Kubernetes context/namespace, and a reachable OCI registry.
-Frontend pods run the repository's pnpm-managed command; the CLI does not
-install or provide a development server. The platform must supply Envoy
-Gateway with the Backend extension enabled and an attachable named Gateway.
+## Prepare a repository
 
-Create `.dev/config.yaml` with `kubeContext`, routing `namespace`, `registry`,
-`ingressHost`, `ingressClass`, required `clusterIssuer`, `gatewayName`, `gatewayNamespace`,
-`ttl`, and `metadataQuery`. Optional `namespaces` and `publicHosts` are explicit
-allowlists (both default to the legacy singular values). `internalGateway`
-defaults to the fully qualified `dev-cli-gateway` Service in the routing
-namespace. `bazelArgs` applies to configured builds, cqueries and runs—for
-example a repository's pinned Linux platform—but not graph-only queries.
-`taskLockNamespace` defaults to the routing namespace. The playground is the
-executable reference:
-https://github.com/antonve/dev-cli-playground/blob/main/.dev/config.json
+### What the repository needs
 
-The CLI discovers `.dev/config.yaml` or the backwards-compatible
-`.dev/config.json`. If both exist, choose explicitly with `--config <path>`;
-it never silently selects another environment. An explicit path may use any
-filename (including `.yml`). For example:
+- Git, the repository's pinned Bazel, and `kubectl` with access to the target
+  context and namespaces.
+- A reachable OCI registry.
+- From the platform: Envoy Gateway with the Backend extension enabled, and a
+  named Gateway that routes can attach to.
+
+### `.dev/config.yaml`
+
+The CLI reads `.dev/config.yaml`, or `.dev/config.json` for older
+repositories. If both exist, you must pick one with `--config <path>`. An
+explicit path can have any filename.
 
 ```yaml
 kubeContext: homelab-dev
@@ -70,129 +55,130 @@ ingressHost: dev-cli-playground.dev.lab
 gatewayNamespace: envoy-gateway-system
 ```
 
-Config, workload templates, dependencies and task Jobs accept YAML or JSON with
-the same field names and validation. Each file must contain exactly one object;
-duplicate keys and multi-document YAML streams are rejected. Use a Kubernetes
-`List` for multiple dependency objects. Quote string values such as `"on"`,
-`"off"`, `"yes"`, `"no"` and numeric environment values to avoid YAML 1.1 scalar
-coercion. Bazel-generated metadata and Kubernetes API payloads remain JSON.
+Required: `kubeContext`, `namespace` (the routing namespace) and `registry`,
+plus `clusterIssuer` unless `hostTLS: gateway`.
 
-Every deployable has one Bazel-owned metadata target attached to the build
-inputs it represents. The emitted JSON declares:
+| Field | Default |
+| --- | --- |
+| `ingressHost` | none; the primary public host |
+| `publicHosts` | `[ingressHost]`; the allowed public hosts |
+| `namespaces` | `[namespace]`; the allowed workload namespaces |
+| `ingressClass` | `nginx` |
+| `gatewayName` | `dev-cli-playground` |
+| `gatewayNamespace` | `namespace` |
+| `internalGateway` | `http://dev-cli-gateway.<namespace>.svc.cluster.local` |
+| `taskLockNamespace` | `namespace` |
+| `ttl` | `8h` |
+| `metadataQuery` | `kind(dev_deployable, //...)` |
+| `bazelArgs` | none; applied to builds, cqueries and runs (for example a pinned Linux platform), not to graph queries |
+
+Unknown keys are rejected. Other options: [dependencies and
+tasks](architecture.md#dependencies-and-tasks), [hooks](architecture.md#lifecycle-hooks),
+[profiles and variables](architecture.md#profiles-and-variables),
+[environment overrides](architecture.md#environment-overrides) and
+[production mode](architecture.md#production-mode). The
+[playground config](https://github.com/antonve/dev-cli-playground/blob/main/.dev/config.json)
+is a working example.
+
+The config, workload templates, dependencies and task Jobs all accept YAML or
+JSON. Each file holds exactly one object; duplicate keys and multi-document
+YAML are rejected (use a Kubernetes `List` for several dependency objects).
+Quote values like `"on"`, `"off"`, `"yes"`, `"no"` and numbers that must stay
+strings, since YAML would otherwise convert them.
+
+### Deployable metadata
+
+Each deployable has one Bazel `dev_deployable` target, attached to the build
+inputs it represents. Its JSON output declares:
 
 | Concern | Fields |
 | --- | --- |
-| Identity and runtime | `name`, `kind` (`frontend`, `backend`, or `worker`), `containerPath`, optional `namespace` and `selectionGroup`; HTTP deployables also declare container `port`, `readinessPath`, optional `servicePort` |
+| Identity and runtime | `name`, `kind` (`frontend`, `backend` or `worker`), `containerPath`, optional `namespace` and `selectionGroup`. HTTP deployables also need `port` and `readinessPath`, and may set `servicePort`. |
 | Build and publication | `buildTarget`, `imageTarget`, `imageName`, `pushTarget` |
 | Workload | optional `workloadTemplate`, `devContainer`, `baseService` |
-| Frontend development | `devCommand`, `sourceRoots`, `syncPaths`, `dependencyPaths`, `dependencyCommand`, optional `syncRoot`, `syncStripPrefix`, `syncExcludes` |
-| HTTP routing | `publicPath`/`publicHost`, `internalHost`, optional authenticated `publicProxy` |
+| Frontend sync | `devCommand`, `sourceRoots`, `syncPaths`, `dependencyPaths`, `dependencyCommand`, optional `syncRoot`, `syncStripPrefix`, `syncExcludes` |
+| HTTP routing | `publicPath`/`publicHost`, `internalHost`, optional `publicProxy` |
 
-Image/push targets are registry-neutral. The push target accepts `--repository`
-and `--tag`; the CLI resolves the resulting digest before creating a workload.
-Backend runtime images need a POSIX shell, tar, cmp, and wget, plus the application
-binary at `containerPath`. The CLI supplies its supervisor via ConfigMap.
-Workers need a POSIX shell, tar, cmp, and the binary at `containerPath`; they
-omit Services and routes. An optional private `port` and `readinessPath` pair
-enables HTTP Pod readiness and live-sync health checks, and requires wget.
-Without that pair, the default readiness probe checks the supervised child
-process. Set an application-specific probe in `workloadTemplate` when process
-liveness alone is insufficient.
-Frontend images must allow the selected development user to write `syncRoot`
-(`/workspace` by default) and run their normal dev/install commands. Backend
-overlays without a workload template run as UID 65532.
+**Push targets** don't hard-code a registry. They must accept `--repository`
+and `--tag`.
 
-Declare only intentional sync roots, and include dependency manifests and
-lockfiles in both watching and synchronization inputs. Only Git-tracked or
-unignored-untracked regular files are eligible. Ignored files, `.env*`, common
-generated trees, dependency trees and Bazel outputs are excluded; symlink
-escapes fail closed.
-Base Services default to the declared deployable names; use `baseService` when
-the name, namespace, or port differs. Applications that need internal branch
-routing call the gateway alias with their logical internal Host and propagate
-the normalized `x-dev-branch`; direct base-Service calls bypass branch
-selection. The playground uses the `dev-cli-gateway` alias.
+**Image requirements:**
 
-`workloadTemplate` is a repository-relative YAML or JSON `PodTemplateSpec`, not a
-Deployment. `devContainer` defaults to `app`. Its pod labels are discarded and
-replaced with isolated CLI labels; annotations and pod/container configuration
-are preserved. `initContainers` are rejected. Use `${DEV_ROUTE}`,
-`${DEV_NAMESPACE}` and `${DEV_VAR_<NAME>}` in environment-specific names or
-Secret references. The
-overlay Service exposes `servicePort` (default `port`) and targets numeric
-container `port`, so templates need not call the port `http`.
+- Backends: a POSIX shell, `tar`, `cmp`, `wget`, and the binary at
+  `containerPath`. Without a workload template they run as UID 65532.
+- Workers: the same, minus `wget` unless they declare a `port` and
+  `readinessPath`.
+- Frontends: the dev user must be able to write to `syncRoot` (default
+  `/workspace`) and run the dev and install commands.
 
-Use the same nonempty `selectionGroup` on deployables that must start together,
-for example an API and its asynchronous worker. Selecting either through a
-source change or `--service` starts both in one branch environment. The worker
-appears in `dev status`, `dev logs`, `dev down`, and TTL cleanup under its own
-service name and has no browser URL.
+**Sync paths.** Declare only what should be copied, and list dependency
+manifests and lockfiles in both `sourceRoots` and `syncPaths`. See
+[live updates](architecture.md#frontends) for what is never copied.
 
-For a protected API, set both `publicProxy` (the Oathkeeper/authentication
-Service reference) and `internalHost`. The public route always targets the
-proxy; only the internal normalized-header route selects the API overlay. Do
-not use `baseService` as an authentication proxy: it is the API's independent
-fallback Service.
+**Base Services** default to the deployable's name. Set `baseService` if the
+name, namespace or port differs.
 
-## Dependency and task declarations
+**Workload templates** are a `PodTemplateSpec`, not a Deployment; see
+[overlays](architecture.md#overlays). The overlay Service exposes
+`servicePort` (default `port`) and targets the container's numeric `port`, so
+the port doesn't need to be called `http`.
 
-Dependencies contain `name`, allowed `namespace`, repository-relative YAML or JSON
-`manifest`, optional `readiness`, and `retention` (`retain`, the default, or
-`down`). A manifest is one namespaced object or a Kubernetes `List`; Secret and
-cluster-scoped objects are rejected. Each readiness entry supplies `resource`,
-token-aware `name`, optional `timeout`, and exactly one of:
+**Selection groups.** Give deployables that must run together the same
+`selectionGroup`, for example an API and its worker. Changing or naming
+either starts both. A worker shows up in `dev status`, `dev logs` and
+`dev down` under its own name, and has no URL.
+
+**Protected APIs.** Set both `publicProxy` (the authentication proxy's
+Service, such as Oathkeeper) and `internalHost`. Public traffic always goes
+through the proxy, and only the internal route reaches the branch API. Don't
+use `baseService` for the proxy: it's the API's fallback.
+
+**Internal calls.** For a service-to-service call to stay on the branch, the
+application must call the gateway alias (`dev-cli-gateway` in the
+playground) with its logical internal Host and pass on the `x-dev-branch`
+header. Calling a base Service directly skips the branch.
+
+### Dependencies and tasks
+
+A dependency has a `name`, an allowed `namespace`, a `manifest` file, optional
+`readiness` and `retention` (`retain`, the default, or `down`). The manifest is
+one namespaced object or a `List`. Each readiness entry has `resource`, `name`,
+optional `timeout`, and one of:
 
 ```json
 {"condition":"Ready"}
 {"jsonPath":".status.PostgresClusterStatus","value":"Running"}
 ```
 
-Tasks contain `name`, `namespace`, YAML or JSON Job `manifest`, stable mutation
-`target`, optional dependency names, and optional `timeout`. The target must
-identify the real shared database/environment consistently across every task;
-it is the cross-owner serialization key. A task may also supply `imageName`,
-registry-neutral `pushTarget`, and `container` to publish the current checkout
-and inject its digest into the named regular or init container. Otherwise the
-Job manifest must deliberately pin the task image; its provenance is independent of the checkout annotation.
-Tasks run when explicitly named or bound to declared lifecycle hooks. Repeat
-`--task` in the required order on `dev up`; a beforeUp or explicit task failure
-blocks that invocation before overlays are published or created. Repositories
-choose whether their startup hooks seed data.
+A task has a `name`, `namespace`, a Job `manifest`, a `target`, optional
+`dependencies` and an optional `timeout`. The `target` must name the real
+thing the task changes (for example the shared database), the same way in
+every task; it's the lock key. To build the task's image from the checkout,
+set `imageName`, `pushTarget` and `container`. Otherwise the Job must pin its
+image.
 
-Both manifest types support `${DEV_ROUTE}`, `${DEV_NAMESPACE}` and declared
-`${DEV_VAR_<NAME>}` string substitution; task targets use the same tokens. They are not shell templates. Dependency resources are immutable
-after creation; change the route/name for a new definition rather than asking
-the CLI to reconcile mutable infrastructure.
+Manifests and task targets support `${DEV_ROUTE}`, `${DEV_NAMESPACE}` and
+`${DEV_VAR_<NAME>}`. This is plain string substitution, not shell templating.
+Dependencies can't be changed after creation; use a new name or route instead.
 
-## Daily commands
+## Daily use
 
 ```sh
 git fetch origin main
 dev doctor
-dev up --owner alice                    # merge-base with origin/main
-dev up --owner alice --service unchanged-api
-dev up --owner alice --dependency postgres --task migrate
-dev provision --owner alice postgres
-dev task --owner alice migrate
-dev up --owner alice --base origin/next # alternative comparison base
-dev status --owner alice
+dev up --owner alice
 dev url --owner alice '/settings?tab=profile'
-dev logs --owner alice                  # all overlay services/namespaces
-dev logs --owner alice hello-api        # optional service filter
+dev status --owner alice
+dev logs --owner alice [service]
 dev down --owner alice
-dev cleanup
 ```
 
-Open the emitted branch-host URL, or use `dev url` for a deep link. The hostname
-selects the environment without a routing cookie. The key includes the owner
-so two developers can use the same branch name. See [deep links](deep-links.md).
-Ctrl-C stops the foreground loop but retains overlays for inspection. Restart
-with the same checkout/owner/branch, or use `dev down` for explicit cleanup.
-Stop an older CLI before upgrading; v0.2.0 does not signal legacy PID files.
+Open the branch URL printed by `dev up`, or make a deep link with `dev url`.
+The route includes the owner, so two people can use the same branch name.
+Ctrl-C stops watching but keeps the environment for inspection; rerun from the
+same checkout to resume, or `dev down` to remove it.
 
-The affected service set is selected at startup. If development expands to
-another service, stop and rerun `dev up` to select the new set. On startup,
-workload readiness, HTTPRoute admission and, for direct public host routes,
-`X-Dev-Backend` from the branch Service are checked. Proxied and internal
-routes still need their own response check before asserting which tier handled
-a request.
+Services are chosen when `dev up` starts. If your work spreads to another
+service, rerun `dev up`. Startup checks that direct public routes answer from
+the branch. For proxied or internal routes, check `X-Dev-Backend` yourself
+before trusting which side served a request.

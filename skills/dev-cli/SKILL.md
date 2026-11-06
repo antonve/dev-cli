@@ -5,150 +5,138 @@ description: Run and verify branch-isolated Kubernetes development environments 
 
 # Develop with dev-cli
 
-Use the repository's `dev` workflow; do not recreate it with manual image pushes,
-kubectl copies/restarts, or application-side branch selectors. Gateway deep links
-require dev-cli v0.3.0 or newer and routes created by that version.
+`dev up` deploys the services your branch changed next to the shared base
+environment, gives the branch its own URL, and live-updates it while you
+edit. Use the `dev` commands for all of this. Don't recreate the workflow with
+manual image pushes, `kubectl cp`, restarts, or app-side branch switches.
 
-## Production mode
+## Ground rules
 
-A configuration with `mode: production` deploys release images to a shared
-production environment. It is maintainer-only: never run `dev up`, `task`,
-`provision`, `down` or `cleanup` with a production configuration unless the
-maintainer explicitly instructs you to for that specific branch and command.
-Reading `dev status` or `dev doctor` output the maintainer shares is fine.
+- **Production configs are off limits.** If the config has
+  `mode: production`, don't run `dev up`, `task`, `provision`, `down` or
+  `cleanup` unless the maintainer tells you to for that branch and command.
+  Reading `dev status` or `dev doctor` output they share is fine.
+- **Stay within your authority.** Check that the configured context,
+  namespaces, hosts, registry, dependencies and task targets are things your
+  task allows you to touch. This skill grants no extra permissions.
+- **Don't print secrets** such as kubeconfigs, Git credentials or registry
+  tokens.
+- **Leave other people's work alone.** Don't stop other loops or worktrees,
+  and never delete base/Argo or unrelated resources.
 
-## Establish the environment
+## Set up
 
-- Read repository instructions and `.dev/config.yaml` (or legacy `.dev/config.json`).
-  If both exist, use `--config <path>` consistently to select the intended environment.
-  Confirm the configured
-  context, all allowed namespaces/hosts, registry, dependency and task target
-  are within the user's task authority.
-  The skill grants no additional deployment, cleanup or publication permission.
-- Check `dev version`, Git branch/status and `git fetch origin main`, then
-  `dev doctor`. YAML configuration, multi-host routing, dependencies and tasks
-  require dev-cli v0.4.0 or newer; `worker` deployables and `selectionGroup`
-  pairing require v0.5.0 or newer; lifecycle hooks require v0.6.0 or newer, variables/profiles require v0.7.0
-  or newer, and environment overrides, `hostTLS: gateway` and production mode
-  require v0.10.0 or newer. Hosts whose Bazel creates no `bazel-*` links
-  (`--symlink_prefix=/`, as on T3 Code) require v0.10.1 or newer. Doctor is a
-  prerequisite check, not an
-  end-to-end build or routing proof. Do not print kubeconfigs, Git credentials
-  or registry tokens.
-- If missing, use the supported Go installation, with existing Git credentials
-  and `GOPRIVATE=github.com/antonve/dev-cli` for the private module:
-  `go install github.com/antonve/dev-cli/cmd/dev@latest`.
-  Bazel belongs to the guest repository, not the CLI installation.
-- Preserve existing worktrees and loops. Choose a stable owner for the session,
-  unique across independent checkouts/machines using the same branch. Pass it
-  consistently with `--owner` or set `DEV_OWNER` in the task environment. Owner is
-  a collision/cleanup identity, not authentication.
+1. Read the repository's instructions and `.dev/config.yaml` (or
+   `.dev/config.json`). If both exist, pass the same `--config <path>` to
+   every command.
+2. Run `dev version`. This skill describes v0.11. If `dev` is older or
+   missing, install it:
+   `GOPRIVATE=github.com/antonve/dev-cli go install github.com/antonve/dev-cli/cmd/dev@latest`
+   (existing Git credentials are enough; Bazel belongs to the repository).
+3. Check `git status` and run `git fetch origin main`, then `dev doctor`.
+   Doctor checks prerequisites only. It doesn't prove builds or routing work.
+4. Pick one owner name for the session, unique to this checkout and machine.
+   Pass it on every command with `--owner` or set `DEV_OWNER`. The owner is
+   for naming and cleanup, not authentication.
 
-## Start and edit
+## Start
 
-Make the intended service edits **before** `dev up --owner <owner>`. Uncommitted
-edits count. The CLI uses the merge base with `origin/main` (or `--base <ref>`)
-and Bazel reverse dependencies to select services once at startup. Unknown files
-conservatively select all deployables. If adding another service later, stop and
-rerun the loop with repeatable `--service <name>`; do not claim automatic
-expansion or infer related services.
+Make your edits **before** `dev up --owner <owner>`. Uncommitted changes
+count. Services are chosen once, at startup, from the diff against
+`origin/main` (or `--base <ref>`). To add a service later, stop and rerun with
+`--service <name>`. Don't claim the CLI picks up new services on its own.
 
-Read declared lifecycle hooks before startup: `beforeUp` runs before explicit
-tasks and publication; `beforeStart` runs before its overlay Deployment.
-Hook failures stop startup and preserve a marker for cleanup. Hooks must be
-idempotent. Check the printed `profile=` and status profile when changed paths
-select a configured profile. A live route cannot switch profiles or resolved
-variables; run down first. Variables render workload/task/dependency manifests and task targets;
-the lifecycle marker keeps resolved values for task/provision and teardown,
-even from a checkout with different defaults. Variables are plaintext data,
-not a place for credentials.
+Before starting, read the config's hooks and profiles:
 
-Provision only explicitly requested dependencies with `dev provision <name>` or
-`dev up --dependency <name>`. `retain` dependencies deliberately survive down
-and TTL. Run repository-defined migrations/seeds with `dev task <name>` or `dev
-up --task <name>` in the required order. A failed/timed-out task blocks that up
-invocation and never triggers reset. Never delete a task Lease to bypass
-serialization. Normal retry recovers only after the exact prior Job is terminal;
-an absent Job still requires proof that the original client stopped, followed
-by the documented compare-and-set holder recovery.
+- `beforeUp` runs before tasks and image publishing, and `beforeStart` runs
+  before each service's overlay. A failed hook stops startup but leaves the
+  route cleanable.
+- If changed paths match a profile, check the `profile=` line `dev up`
+  prints. A running route can't switch profiles or variable values; run
+  `dev down` first.
+- Variables are plain text. Never put credentials in them.
 
-Keep `dev up` running in a durable terminal/session supported by the environment.
-Record the exact checkout, branch, owner and terminal/log handle. Do not launch
-a second loop for the same checkout/route. `--no-watch` only performs initial
-sync and is not live development.
+Dependencies and tasks run only when asked for:
 
-- Frontend: edit declared sync paths; the CLI transfers files and the pod's
-  normal pnpm-managed dev server provides HMR. Ordinary source edits do not
-  rebuild images. Dependency changes run the declared dependency command.
-- Backend: the loop builds the affected Bazel binary, uploads it, restarts the
-  supervised process in the same pod and waits for readiness. Compile failures
-  retain the working process. Readiness failure restores the previous binary.
-- Read errors from the loop, `dev status --owner <owner>`, aggregate `dev logs
-  --owner <owner>`, or filtered `dev logs --owner <owner> <service>` (flags
-  precede positional arguments).
-  Fix source/config errors within scope; stop for missing authority or unsafe
-  infrastructure changes rather than bypassing the CLI.
+- `dev provision <name>` or `dev up --dependency <name>`. `retain`
+  dependencies survive `dev down` and expiry on purpose.
+- `dev task <name>` or `dev up --task <name>`, in the order the repository
+  needs. A failed task stops `up` and never resets anything.
+- Never delete a task Lease. If a Lease is stuck and its Job no longer
+  exists, prove the original client has stopped, then follow the
+  compare-and-set recovery in dev-cli's `docs/troubleshooting.md`.
 
-## Give the user a clickable link
+Run `dev up` in a terminal that will survive the session. Record the checkout,
+branch, owner and terminal or log handle. Only one loop per checkout and
+route. `--no-watch` only does the first sync; it isn't live development.
 
-With certificate host TLS (the default), `clusterIssuer` is required; the CLI prints branch-host links. Each branch is its
-own browser origin, so independent owners work in one profile. Application login
-remains application-owned. Verify TLS readiness and owned Ingress/Certificate/
-Secret removal on down; cert-manager must enable certificate owner references.
-Startup fails with a describe hint when its certificate is not ready.
+## Edit
 
-Return the actual **Open environment** URL printed after startup, or run:
+- **Frontend:** edit files under the declared sync paths. They're copied into
+  the pod and the dev server hot-reloads them. No image rebuild happens.
+  Dependency file changes rerun the install command.
+- **Backend:** the loop rebuilds the binary, restarts it in the same pod and
+  waits for readiness. A compile error keeps the old process running. A
+  readiness failure restores the previous binary.
+- **Errors:** read the loop output, `dev status --owner <owner>` and
+  `dev logs --owner <owner> [service]` (flags go before the service name).
+  Fix source and config problems within your task. Stop and ask about missing
+  permissions or risky infrastructure changes; don't work around the CLI.
+
+## Share the link
+
+Give the user the **Open environment** URL that `dev up` printed, or build a
+deep link:
 
 ```sh
 dev url --owner <owner> '/desired/path?existing=value#section'
 dev url --owner <owner> --host <configured-host> '/desired/path'
 ```
 
-Quote destinations containing `&`, `?` or `#`. `dev url` only formats a link;
-it does not start or verify an environment. `dev status` includes branch `url`,
-plain `baseURL`, per-host maps, workload and sync health. Never ask the user to
-copy a route key into a menu. Paths, queries and fragments are preserved.
-Lab DNS/network/CA access is still required. Links are not access control.
+Quote paths containing `&`, `?` or `#`. `dev url` only prints a link; it
+doesn't check that the environment works. `dev status` lists every branch and
+base URL plus workload and sync health. Never ask the user to copy a route
+key anywhere.
 
-For a v0.6–v0.8 environment, stop its loop, add `clusterIssuer`, remove a legacy
-`cookieName` config key, then rerun up or run down with the new CLI. Rerunning
-retires only that owner/route's old public selection rules. Use the new links.
+Each branch is its own browser origin, so several can be open in one profile.
+Links don't log anyone in or grant access, and the user still needs lab
+network, DNS and CA access.
 
-## Prove the result and hand off
+## Verify
 
-Confirm the affected service list before calling startup successful. Startup
-already waits until each direct public host answers from the branch Service;
-`publicProxy` and internal routes are not checked, so verify their actual
-application responses: a healthy HTTPRoute alone does not prove which workload
-served the request. For partial
-overlays verify each service independently falls back to base; internal calls
-still need the application's existing normalized-header propagation through the
-gateway. Do not promise transparent backend context propagation.
-Where routing headers are available, `X-Dev-Selected` reports the requested
-selection and `X-Dev-Backend` identifies the upstream that served the response.
-Check the latter before attributing a response to an overlay.
+- Confirm the list of selected services.
+- `dev up` already checks that each direct public host answers from the
+  branch. It doesn't check `publicProxy` or internal routes, so verify those
+  with a real request.
+- Check `X-Dev-Backend` before saying the branch served a response.
+  `X-Dev-Selected` only shows which branch was requested.
+- With some services on the branch and some on the base, check that each
+  falls back to base on its own. Internal calls stay on the branch only if
+  the app passes on the `x-dev-branch` header. Don't promise that happens
+  automatically.
+- For live edits, make a second visible change while the **same loop** keeps
+  running. Check frontend HMR in a browser without reloading where you can,
+  check backend behaviour on a fresh request, and confirm pod UIDs and image
+  digests didn't change. Say which kind of evidence you have: a browser HMR
+  check is stronger than a file-sync log or an HTTP response.
+- A UI that loaded diagnostics once may need a refresh to show a backend
+  change. Failover takes a few seconds and isn't error-free.
 
-For live-edit tests, make a second visible edit while the **same loop** runs.
-Verify frontend HMR in a browser without navigation when possible, backend
-identity/readiness on a fresh request, and unchanged pod UIDs/image digests.
-Distinguish browser HMR proof from source-transfer or HTTP-only evidence. A UI
-that fetched diagnostics once may need refreshing to display a backend change.
-Allow bounded routing/health convergence; failover is not guaranteed zero-error.
+## Hand off or clean up
 
-If asked to leave a demo running, retain its loop and overlays and return the
-clickable URL, owner, checkout/branch, visible change, expiry, log handle and exact
-cleanup command. Be honest if the terminal cannot survive the handoff. Otherwise
-use `dev down --owner <owner>` from the same branch/checkout to stop the local
-loop and remove only that environment. Ctrl-C alone leaves Kubernetes resources.
+**Leaving a demo running:** keep the loop and overlays, and tell the user the
+URL, owner, checkout and branch, the visible change, the expiry, the log
+handle and the exact cleanup command. Say so if the terminal won't survive
+the handoff.
 
-`dev cleanup` is broader: it removes expired CLI-owned environments across owners
-in configured namespaces, but never retained dependency data. Up/status also
-perform expiry maintenance; status skips marked routes, reports
-`teardownPending`, and never runs hooks. Down/cleanup wait for stopped pods,
-run recorded `afterStop` and `afterDown` tasks with the recorded owner, then
-remove dependencies and task Jobs and delete the lifecycle marker last. A
-failed hook retains the marker for retry. Missing recorded tasks skip the
-route with a warning. Inspect the hook Job logs, fix the cause, and rerun
-down/cleanup; never delete a lifecycle marker by hand. Do not
-use cleanup to delete another active environment or imply that expiry has an
-always-running reaper. Never delete base/Argo resources or unrelated resources.
+**Otherwise:** run `dev down --owner <owner>` from the same checkout. Ctrl-C
+alone leaves the Kubernetes resources running.
+
+`dev cleanup` removes expired environments for every owner, but never
+retained dependency data. Don't use it to remove someone's active
+environment, and don't suggest that expired environments get removed in the
+background. Cleanup only runs on `dev up`, `dev status` and `dev cleanup`.
+
+If teardown fails, read the hook Job logs, fix the cause and rerun
+`dev down` or `dev cleanup`. Never delete the lifecycle marker by hand.
+`teardownPending` in `dev status` means teardown still has to run.

@@ -1,9 +1,9 @@
 # Contributing
 
-Keep reusable development orchestration here. Application sources, their
-Bazel graph and images, deployment metadata, and application conformance tests
-belong in the target application repository. Gateway installation belongs to
-the platform. Do not add Bazel or application-specific runtime servers here.
+This repository holds the reusable CLI only. Application code, its Bazel
+graph, images, deployable metadata and conformance tests live in the
+application repository. Installing the gateway is the platform's job. Don't
+add Bazel or app-specific servers here.
 
 ```sh
 go test -count=1 -race ./...
@@ -11,24 +11,43 @@ go vet ./...
 go install ./cmd/dev
 ```
 
-The packages separate Git discovery (`gitx`), Bazel graph/build operations,
-registry publication resolution, Kubernetes resources and runtime operations,
-filesystem/build loops (`syncer`), configuration, naming, and local ownership.
-External commands go through the injectable `execx.Runner`; tests use fake
-outputs for failure cases and temporary files/processes for filesystem and
-socket behavior. Include a regression test when fixing a lifecycle boundary.
+## Code layout
 
-No Actions runner is required for these CLI gates. The playground separately
-uses GitHub-hosted Ubuntu CI under the owner's explicit authorization.
+| Package | Responsibility |
+| --- | --- |
+| `app` | Commands and the `up` lifecycle |
+| `deeplink` | Branch URLs |
+| `gitx` | Git discovery |
+| `bazel` | Graph queries and builds |
+| `registry` | Publishing and digest resolution |
+| `kube` | Kubernetes resources and runtime operations |
+| `syncer` | File sync and build loops |
+| `config`, `naming`, `localstate` | Configuration, resource names, local process ownership |
 
-Never mutate an Argo base Deployment to make an overlay. Route, owner, service,
-and management labels are cleanup boundaries. Keep upload staging inert until
-transfer completes, preserve the last working backend on build/readiness
-failure, and never acknowledge local shutdown before its work has stopped.
+External commands go through `execx.Runner`, so tests can fake their output.
+Tests use real temporary files and processes for filesystem and socket
+behaviour. Add a regression test when you fix a lifecycle bug.
 
-Before releasing, run the playground's complete Bazel/pnpm/image gates and live
-branch conformance. Verify browser DOM HMR without navigation, binary restart
-and readiness recovery, two branch hosts in one profile and internal hops, idempotent
-startup, deletion fallback, TTL cleanup, installation from a clean checkout,
-and a healthy Argo base. Tag only after those gates; test the published @latest
-installation separately.
+## Rules that must hold
+
+- Never modify an Argo base Deployment to create an overlay.
+- Route, owner, service and management labels define what cleanup may
+  delete. Keep them accurate.
+- An upload must not be visible until it has fully transferred.
+- A failed build or readiness check must leave the last working backend
+  running.
+- Never report local shutdown as done before the work has actually stopped.
+
+## Releasing
+
+These gates run locally; no Actions runner is needed. (The playground has its
+own GitHub-hosted CI.)
+
+1. Run the playground's full Bazel, pnpm and image gates, plus live branch
+   conformance.
+2. Check by hand: browser HMR without a page reload, backend restart and
+   readiness recovery, two branch hosts in one browser profile, internal hops,
+   rerunning `dev up`, fallback after deletion, TTL cleanup, installing from a
+   clean checkout, and a healthy Argo base.
+3. Tag the release.
+4. Test the published `@latest` install separately.
