@@ -1,353 +1,441 @@
-# Architecture and repository contract
+# Architecture
 
-The CLI deliberately has no workload catalog. A Bazel repository defines one
-`dev_deployable` metadata target per deployable and connects it to the build
-graph it represents. The emitted JSON names logical application image and push
-targets, runtime kind, readiness path, development command, routes, build
-target, and sync roots. Registry locations remain environment configuration.
-Deployables sharing a `selectionGroup` are selected together when any one is
-affected or explicitly named. An empty group leaves selection independent.
+The CLI has no list of workloads of its own. The repository describes each
+deployable with a Bazel `dev_deployable` metadata target, and `.dev/config.yaml`
+describes the cluster. Everything below follows from those two inputs.
 
-`dev up` computes `merge-base(origin/main, HEAD)` by default, asks Bazel `rdeps`
-which metadata targets are affected, builds only their image targets, and runs
-their registry-neutral push targets with a collision-resistant route/revision
-tag. It resolves each published manifest and injects the immutable digest into
-the overlay Deployment. An unmapped changed file fails closed by selecting all
-deployables.
+## Choosing what to deploy
 
-Names contain a readable owner/branch prefix plus a SHA-256-derived suffix.
-Original owner and branch values are retained in annotations. Every temporary
-resource carries owner, route, service, source/base revision, timestamps,
-expiry, and CLI version. The CLI never mutates an Argo-owned base Deployment.
+`dev up` compares `HEAD` (including uncommitted and untracked files) with
+`merge-base(origin/main, HEAD)`, or with `--base <ref>`. It asks Bazel `rdeps`
+which metadata targets the changed files affect. A changed file Bazel doesn't
+know about selects every deployable, to be safe.
 
-Configuration `deployables` overrides replace a deployable's namespace,
-workload template, base Service, public proxy, internal host and public host
-before validation, so a configuration outside the repository can target
-another environment. With `manifestsRelativeTo: config`, templates, tasks and
-dependencies resolve inside the configuration file's directory instead of the
-checkout.
+- `--service <name>` adds a deployable that didn't change.
+- Deployables that share a `selectionGroup` are always selected together. An
+  empty group means the deployable is selected on its own.
+- The selection is fixed at startup. To add a service later, stop and rerun
+  `dev up`.
 
-Deployables may name a repository-relative YAML or JSON `workloadTemplate` containing a
-Kubernetes `PodTemplateSpec` and a `devContainer`. The CLI preserves its pod
-spec—including service accounts, projected volumes, Secret references,
-resources, working directory, arguments and probes—then changes the designated
-container's image/runtime fields. It replaces all pod labels with isolated
-selector labels, so a base Service cannot select an overlay. Template
-`initContainers` are rejected: migrations and seeds use declared tasks instead.
-`${DEV_ROUTE}`, `${DEV_NAMESPACE}` and declared `${DEV_VAR_<NAME>}` values
-are substituted; see Profiles and variables.
+## Images
 
-## Production mode
+For each selected deployable, the CLI builds its image target and runs its push
+target with a unique route/revision tag. Push targets don't hard-code a
+registry; the config's `registry` supplies it. The CLI then resolves the pushed
+image to its digest and deploys by digest.
 
-`mode: production` replaces the development runtime with release images. The
-configuration must publish to a registry path ending in `/branches`, build with
-`--config=release`, list `refuseChangedPaths`, and override every deployable's
-`workloadTemplate`, so no development template can reach production. Metadata
-supplies `release.imageName` and `release.pushTarget`; the development image,
-push target, command, sync and dependency fields are ignored.
+Digest resolution answers the registry's anonymous Bearer challenge, as ghcr.io
+requires. If the token is denied, the command fails with "image is not
+anonymously pullable" and names the repository: the cluster pulls without a
+Secret, so the image must be public to it.
 
-A preflight runs before any build or write for `up`, `task` and `provision`:
-clean working tree, HEAD contained in a fetched `origin` branch, no change under
-a refused prefix, and a routing namespace labelled for production. One push
-guard covers overlays and task images. It allows only `<route>-<commit12>`
-tags, one image name directly under the configured registry, and push targets
-whose `bazel query --output=build` definition sets neither `repository` nor
-`remote_tags`; a release target such as rules_oci `oci_push` with
-`remote_tags` would otherwise still apply `latest` and `prod`.
+## Overlays
 
-An existing branch tag is reused because it names a clean, pushed commit. The
-anonymous digest resolution after a push proves the cluster can pull the image
-without a pull Secret. Overlays apply only the digest, labels and annotations to
-the template and wait for rollout status for every kind. `up` never starts the
-heartbeat or watch loop; expiry is creation plus `ttl`, renewed by rerunning
-`up`, and teardown uses the same lifecycle hooks as development.
+An overlay is the branch's copy of a deployable, running next to the base.
 
-## Runtime ownership
+- **Names** are a readable owner/branch prefix plus a SHA-256 suffix. The
+  original owner and branch are kept in annotations.
+- **Labels** on every resource record owner, route, service, source and base
+  revision, timestamps, expiry and CLI version. They are also what cleanup
+  matches on.
+- **The base is never modified.** The CLI never changes an Argo-owned base
+  Deployment.
 
-Frontend metadata declares a normal repository-owned pnpm dev command. The CLI
-starts the application image once with that command and copies changed source
-files directly into its writable workspace. Vite, Next.js, TanStack Start, or
-another repository-selected dev server owns filesystem watching and HMR; the
-CLI does not ship a frontend server.
+A deployable can name a `workloadTemplate`: a YAML or JSON `PodTemplateSpec`
+with a `devContainer` (default `app`). The CLI keeps the pod spec as written,
+including service accounts, volumes, Secret references, resources, working
+directory, arguments and probes. It changes only the dev container's image and
+runtime fields. Pod labels are replaced so a base Service can never select an
+overlay pod. `initContainers` are rejected; use [tasks](#dependencies-and-tasks)
+for migrations and seeds. Templates can use `${DEV_ROUTE}`, `${DEV_NAMESPACE}`
+and `${DEV_VAR_<NAME>}` ([variables](#profiles-and-variables)).
 
-Only declared `syncPaths` are copied. Git's tracked plus unignored-untracked set
-is the upper bound, so ignored private/generated files are not transferred.
-The CLI also excludes `.env*`, dependency trees, Bazel outputs, `.next`, `dist`,
-and coverage by default; `syncExcludes` adds repository-relative
-`filepath.Match` patterns. Symlink escapes are rejected. `syncRoot` and
-`syncStripPrefix` map repository paths to the image layout. Deleted files are
-removed using the CLI's prior file manifest; unrelated files are retained.
-`dependencyPaths` identify manifests and lockfiles, and `dependencyCommand`
-declares the repository's install command. Include those paths in both
-`sourceRoots` and `syncPaths`. The command runs after initial sync, changes to
-those dependency inputs, or container replacement—not on ordinary source edits.
+## Live updates
 
-Watch retries unsuccessful transfers with a bounded backoff and checks pod UID
-and app restart count every two seconds. A replacement runtime receives the
-current local contents even if no further file is edited. Sync errors and last
-successful sync time are recorded on the owned Deployment for `dev status`.
-TTL heartbeats run independently of source polling and builds, so slow cluster
-bookkeeping cannot pause live edits. Shutdown cancels and joins the heartbeat
-before acknowledging `dev down`; reporting remains on the main watch loop.
+### Frontends
 
-Backend images contain only the application. The CLI injects its own versioned
-POSIX supervisor in a ConfigMap, stages a successfully rebuilt Bazel binary in
-an `emptyDir`, signals the process, and waits for the declared readiness URL.
-Compile failures never touch the running binary. A readiness failure triggers a
-swap back to the previous binary and a second readiness check.
-The watch loop compares the rebuilt binary with the running Pod's current
-binary after a staged upload. Identical content keeps its process running even
-when a watched source file changes. Comparing inside the Pod also handles a
-reused overlay whose running binary differs from its base image.
+The pod runs the image once with the repository's own pnpm dev command (Vite,
+Next.js, TanStack Start or anything else). The CLI copies changed files into
+the pod, and the dev server handles watching and HMR. The CLI ships no
+frontend server.
 
-`worker` uses the same supervisor and binary update flow without a Service or
-route. It may declare a private `port` and `readinessPath` pair for an HTTP
-Pod probe and binary replacement check. Without that pair, its default
-readiness probe and replacement check require the same child process to stay
-alive. A repository can supply a stronger application-specific readiness probe
-in its workload template.
+What gets copied:
 
-## Routing ownership
+- only files under the declared `syncPaths`, and only files Git tracks or
+  could track (ignored files never leave your machine);
+- never `.env*`, dependency trees, Bazel outputs, `.next`, `dist` or coverage;
+  `syncExcludes` adds more `filepath.Match` patterns;
+- no symlinks that point outside the repository.
 
-The required `clusterIssuer` lets the CLI own one host-only HTTPRoute per public deployable
-and one Ingress covering every `<route>.<publicHost>`. Host routes set the
-trusted branch header and retain authentication proxy or active/base backend
-references. Health policies include direct host routes. The Ingress
-forwards to the routing namespace's `dev-cli-gateway` Service and requests TLS
-through cert-manager. Down/expiry remove the owned Ingress. cert-manager must
-run with `--enable-certificate-owner-ref=true`, so deleting the Ingress removes
-its Certificate and Secret. Startup waits for certificate creation and readiness
-within one 120-second deadline and fails with a describe hint if TLS is not
-ready. Doctor checks the
-issuer, gateway Service and Ingress/certificate permissions.
+`syncRoot` and `syncStripPrefix` map repository paths to the image layout.
+Deleted files are removed from the pod; files the CLI didn't put there are left
+alone.
 
-With `hostTLS: gateway`, the CLI creates neither the Ingress nor a
-certificate. Host routes attach directly to the configured public Gateway,
-whose wildcard listener terminates TLS and must admit routes from the routing
-namespace; `clusterIssuer` is then optional. Routes for `internalHost` attach
-to `internalGatewayName`/`internalGatewayNamespace`, which default to the
-public Gateway.
+`dependencyPaths` (manifests and lockfiles) and `dependencyCommand` (for
+example `pnpm install`) handle dependency changes. Include those paths in both
+`sourceRoots` and `syncPaths`. The command runs after the first sync, when a
+dependency file changes, and when the container is replaced. It does not run
+on ordinary source edits.
 
-Browser selection uses [gateway-owned deep links](deep-links.md): `dev up` and
-`dev status` expose URLs, while `dev url` preserves a supplied deep destination.
-Only the branch hostname selects an environment.
-Guest frontends need no dev-specific code.
+Failed transfers retry with backoff. Every two seconds the CLI checks the pod
+UID and restart count; a replaced container gets the current files without
+waiting for another edit. Sync errors and the last successful sync time show
+up in `dev status`.
 
-The current routing adapter requires Envoy Gateway with its Backend extension
-enabled (`config.envoyGateway.extensionApis.enableBackend: true`) and a named
-Gateway. It is not portable to every Gateway API implementation: health-based
-failover depends on this provider. The
-base application declares ordinary HTTPRoutes. Deployables independently name
-their workload namespace, public host, overlay Service port, and base Service
-name/namespace/port. A public route matches
-the branch hostname and replaces `x-dev-branch` with the route key; the platform's
-base routes remove an untrusted browser header. An internal route matches the
-normalized header propagated by an application. When `publicProxy` is set, the
-public route always targets that authentication proxy and the overlay is
-reachable only through the separate `internalHost` route. This keeps
-Oathkeeper or another existing boundary in front of both selected and base
-traffic. The proxy/application remains responsible for propagating normalized
-context internally; a browser header cannot override the public route's value.
+### Backends
 
-Each route chooses its backend independently. Unaffected deployables reference
-the base Service directly. Affected deployables use two Envoy Backend resources:
-the branch Service as the active tier and the base Service as the fallback tier.
-Both reference explicit namespace-local Service DNS names, so deleting the
-branch Service does not invalidate the HTTPRoute's object references. A
-BackendTrafficPolicy checks the declared readiness path every second with a
-three-second timeout. Three consecutive failures select the base tier and one
-success restores the branch, so a slow server-rendered first response does not
-fail over, while a hung branch fails over within about twelve seconds. Envoy
-refreshes these temporary Service DNS records every second without retaining
-the cluster DNS TTL, so a recreated Service does not leave a stale address for
-the default thirty-second refresh interval. Envoy
-selects the base tier when the branch tier is unavailable, even if the local CLI
-is stopped. Failover is eventual, not a zero-error guarantee: health checks,
-DNS, and data-plane configuration take time to converge.
+Backend images contain only the application. The CLI adds its own small POSIX
+supervisor through a ConfigMap. On each edit it:
 
-The CLI waits for current-generation HTTPRoute Accepted and ResolvedRefs
-conditions, then for the gateway itself to serve each selected deployable's
-direct public host route from the branch. It requests
-`https://<route>.<publicHost><readinessPath>` (the `publicPath` when the
-readiness path lies outside it) from the operator's machine, without following
-redirects, until three consecutive responses below HTTP 500 carry the overlay
-Service's DNS name in `X-Dev-Backend`. Only then does it print the environment
-links. After three minutes without that, `up` fails with the URL, the expected
-backend and the last response or `X-Dev-Backend` it saw, and leaves every
-resource in place. Workers, internal-only `internalHost` routes and
-`publicProxy` deployables are not probed: the internal gateway is not reachable
-from the operator's machine, and a proxy's own rules decide which paths reach
-the application. Their branch selection still follows the same health policy.
+1. rebuilds the Bazel binary (a compile error leaves the running binary alone);
+2. uploads it to an `emptyDir` and compares it with the running binary,
+   skipping the restart if it's identical;
+3. restarts the process and waits for the readiness URL;
+4. if readiness fails, swaps back to the previous binary and checks again.
 
-### Response provenance
+### Workers
 
-CLI-owned routes use native Envoy `ResponseHeaderModifier` filters, without
-application changes or gateway-wide patches:
+`worker` deployables use the same supervisor and binary updates, with no
+Service or route. A worker can declare a private `port` and `readinessPath`
+for an HTTP readiness probe. Without them, readiness just means the process is
+still running. A workload template can supply a stronger probe.
+
+### Expiry
+
+While `dev up` runs, it renews the environment's expiry every 30 seconds (or a
+third of the TTL, if shorter). Renewal runs separately from syncing and
+building, so a slow cluster never pauses live edits. Once `dev up` stops, the
+last renewed expiry stands.
+
+## Routing
+
+Routing requires Envoy Gateway with its Backend extension enabled
+(`config.envoyGateway.extensionApis.enableBackend: true`) and a named Gateway.
+Health-based failover depends on Envoy Gateway, so other Gateway API
+implementations won't work.
+
+### Branch hostnames
+
+Each public deployable gets `https://<route>.<publicHost>/`. The hostname is
+the only thing that selects a branch; see [branch links](deep-links.md).
+`hostTLS` decides where TLS comes from:
+
+| `hostTLS` | What the CLI creates | Needs |
+| --- | --- | --- |
+| `certificate` (default) | One host-only HTTPRoute per public deployable, plus one Ingress covering every branch host, with a cert-manager certificate. | `clusterIssuer`; cert-manager running with `--enable-certificate-owner-ref=true` so deleting the Ingress also deletes its Certificate and Secret. |
+| `gateway` | Host routes attached straight to the public Gateway. No Ingress or certificate. | A wildcard listener on the Gateway that terminates TLS and admits routes from the routing namespace. |
+
+With `certificate`, startup waits up to 120 seconds for the certificate and
+fails with a `kubectl describe` hint if it isn't ready. `dev down` and expiry
+delete the Ingress.
+
+Routes for `internalHost` attach to `internalGatewayName` and
+`internalGatewayNamespace`, which default to the public Gateway.
+
+### Public, internal and proxied routes
+
+- **Public routes** match the branch hostname and set the `x-dev-branch`
+  header to the route key, overwriting anything the browser sent. The
+  platform's base routes must strip that header from untrusted requests.
+- **Internal routes** match the `x-dev-branch` header. To keep a call on the
+  branch, an application calls the gateway alias (`dev-cli-gateway`) with the
+  logical internal Host and passes the header on. Calling a base Service
+  directly bypasses branch selection.
+- **Proxied routes.** When a deployable sets `publicProxy` (for example
+  Oathkeeper), its public route always goes to that proxy, and the overlay is
+  reachable only through the `internalHost` route. Authentication stays in
+  front of both branch and base traffic.
+
+### Failover to the base
+
+Each route picks its backend on its own. An unchanged deployable points
+straight at its base Service. A changed one gets two Envoy Backends: the
+branch Service first, the base Service as fallback.
+
+A BackendTrafficPolicy checks the readiness path every second with a
+three-second timeout. Three failures in a row switch to the base; one success
+switches back. A slow first server-rendered response doesn't trigger
+failover, and a hung branch fails over within about twelve seconds. This also
+works when your local CLI isn't running.
+
+Both Backends use namespace-local Service DNS names, so deleting the branch
+Service doesn't break the HTTPRoute. Envoy re-resolves these names every
+second instead of using the cluster DNS TTL, so a recreated Service never
+leaves a stale address.
+
+Failover takes time to settle, and some requests may fail while it does.
+
+### Startup check
+
+Before printing links, `dev up` waits until each HTTPRoute is Accepted with
+ResolvedRefs. It then requests
+`https://<route>.<publicHost><readinessPath>` from your machine (the
+`publicPath` instead, if the readiness path lies outside it) without
+following redirects. It needs three responses in a row below HTTP 500 whose
+`X-Dev-Backend` is the branch Service.
+
+After three minutes without that, `up` fails. The error shows the URL, the
+expected backend, and the last response it got. Nothing is torn down.
+
+Workers, internal-only routes and `publicProxy` deployables aren't checked:
+your machine can't reach the internal gateway, and a proxy decides for itself
+which paths reach the app. Failover still applies to them.
+
+### Response headers
+
+Routes the CLI creates add these headers using Envoy's own
+`ResponseHeaderModifier`. The application needs no changes:
 
 | Header | Meaning |
 | --- | --- |
-| `X-Dev-Selected` | Normalized environment route key, or `base` for a clear link. Selection intent, **not** proof of overlay use. |
-| `X-Dev-Backend` | Envoy's actual selected upstream hostname, or IP:port when no DNS name is available. |
-| `X-Dev-Proxy-Backend` | On a `publicProxy` route, the outer authentication proxy's upstream instead; any internal `X-Dev-Backend` is preserved. |
+| `X-Dev-Selected` | The route key, or `base`. This shows which branch the request asked for, not where it went. |
+| `X-Dev-Backend` | The upstream Envoy actually chose, from [`%UPSTREAM_HOST_NAME%`](https://www.envoyproxy.io/docs/envoy/v1.39.0/configuration/advanced/substitution_formatter). |
+| `X-Dev-Proxy-Backend` | On a `publicProxy` route: the proxy's upstream. Any `X-Dev-Backend` from the inner hop is passed through. |
 
-Branch-host responses also set `Cache-Control: no-store` and
+Branch hosts also send `Cache-Control: no-store` and
 `X-Robots-Tag: noindex, nofollow`.
 
-The backend value uses Envoy's native
-[`%UPSTREAM_HOST_NAME%` formatter](https://www.envoyproxy.io/docs/envoy/v1.39.0/configuration/advanced/substitution_formatter).
-For active/fallback DNS Backends this identifies the overlay or base Service
-actually selected by health-based routing, not merely the matched HTTPRoute.
-Ordinary Service references may yield a pod IP:port instead: inspect endpoints
-to map that address, and do not treat it as a categorical `base`/`overlay` flag.
-On errors this can identify an **attempted** upstream, not a completed response;
-if no upstream was selected it can be empty/absent. Always inspect HTTP status.
+Reading `X-Dev-Backend`:
 
-Diagnostic request headers are removed before forwarding, and direct data routes
-overwrite upstream diagnostic response values. Public selection is still derived
-from the hostname, never a browser routing header. The trusted `publicProxy`
-must preserve internal response headers for API identity to reach the browser.
-An authentication rejection or a call through an uninstrumented internal
-base route can have only the proxy header: absence means **unknown**, not base.
-These are development diagnostics, not a security attestation or full hop trace.
+- For changed deployables it is the branch or base Service name, so it tells
+  you which one failover picked.
+- For a plain Service reference it may be a pod `IP:port`. Look at the
+  endpoints to identify it.
+- On an error it may name an upstream that was tried but didn't answer, or be
+  missing. Always check the status code too.
+- A missing header means **unknown**, not base. Auth rejections and calls
+  through base routes the CLI doesn't own carry no header.
 
-Only CLI-owned routes are instrumented. Existing static base routes are untouched;
-unselected, expired or deleted environments may return no diagnostic headers.
-Rerun `dev up` with the new CLI to instrument existing overlays. View headers in
-the browser Network panel or with `curl -D - -o /dev/null '<environment URL>'`.
-This does not add cross-origin JavaScript exposure or change application CORS.
-
-This preserves partial-overlay fallback and internal-hop affinity without a
-service mesh, application router, Kubernetes discovery in application code, or
-overlay lifecycle controller.
+To see the headers, open the browser's Network panel or run
+`curl -D - -o /dev/null '<environment URL>'`. Environments created by an older
+CLI get the headers after you rerun `dev up`. These headers are for debugging.
+They are not a security guarantee or a full trace.
 
 ## Dependencies and tasks
 
-`.dev/config.yaml` (or `.dev/config.json`) may declare environment-owned dependency manifests and named
-task Jobs as repository-relative YAML or JSON. `dev provision` and `dev task` are
-explicit operations; `dev up --dependency ... --task ...` runs provision →
-readiness → tasks in flag order before applying an overlay. A failed task aborts
-that up invocation before overlay publication or creation. Startup runs
-repository-declared hooks; migrations/seeds run only when requested explicitly
-or by those hooks.
+`.dev/config.yaml` can declare **dependencies** (for example a branch
+database) and **tasks** (Jobs such as migrations or seeds). Both run only when
+you ask for them, through `dev provision`, `dev task`,
+`dev up --dependency … --task …` or [hooks](#lifecycle-hooks).
+`dev up --dependency db --task migrate` provisions, waits for readiness, then
+runs tasks in flag order. A failed task stops `up` before any overlay is
+published.
 
-Dependency objects must be namespaced in an allowed namespace. Server dry-run
-proves their scope; Secret and cluster-scoped objects are rejected. Atomic
-create plus an immutable manifest hash prevents cross-owner adoption races and
-makes identical reprovisioning idempotent. Readiness supports either a standard
-`condition` or `jsonPath` plus `value`. Retention is written on each object:
-`retain` is the default and survives down/TTL, while `down` is removed only
-after live ownership and persisted retention are verified. A later config edit
-cannot turn retained data into disposable data.
+Dependency rules:
 
-Tasks accept exactly one Job and preserve its Secret references. A `target`
-identifies the mutated database/environment; one Lease in the shared
-`taskLockNamespace` serializes it across task names, owners and Job namespaces.
-A lock is released only after a terminal Complete or Failed Job condition.
-After interruption, only the exact prior Job reaching a terminal condition
-permits automatic takeover. Lease expiry or Job absence is not sufficient: the
-prior client may be paused between acquiring the Lease and creating the Job.
-An abandoned absent-Job holder therefore requires the inspected compare-and-set
-recovery in the troubleshooting guide. Optional `imageName`, `pushTarget` and
-`container` fields publish the current source revision and inject its digest
-into the named regular or init container. A migration init container can finish
-before a pinned post-migration container runs.
-Without them, the manifest's explicitly pinned image owns provenance.
+- Objects must be namespaced, in an allowed namespace. Secrets and
+  cluster-scoped objects are rejected; a server dry-run confirms the scope.
+- Dependencies are immutable. Creation is atomic and records a manifest hash,
+  so reprovisioning the same manifest is a no-op and two owners can't take
+  over each other's objects. To change one, use a new name or route.
+- Readiness is a `condition`, or a `jsonPath` with a `value`.
+- `retention: retain` (the default) survives `dev down` and expiry.
+  `retention: down` is deleted on teardown, after ownership and the stored
+  retention are checked. Changing the config later can't make retained data
+  deletable.
 
-The foreground `dev up` process owns local watching. `dev down` removes only
-objects matching both current owner and route labels, including the Backend and
-BackendTrafficPolicy resources. Expiry cleanup scans all owned resource kinds,
-so orphan routing objects remain cleanable after their Deployment disappears.
-Expiry maintenance runs on startup/status or through `dev cleanup`; status
-never runs lifecycle hooks and leaves marked routes pending teardown.
-While the local watcher runs it renews expiry every 30 seconds (or one third
-of a shorter configured TTL). After it stops, the last renewed expiry remains
-the cleanup deadline.
+Task rules:
 
-On supported Linux/macOS development hosts, an exclusive file lock admits one
-local `dev up` per checkout and route before publication or cluster mutation.
-A private Unix socket handles status and graceful stop. `dev down` waits for
-that owner to stop before deleting resources; it never signals a stored PID.
-After an abrupt exit the kernel releases the lock and the next invocation
-reclaims the stale socket. Stop older CLI versions before upgrading: legacy
-PID files are intentionally not used to control unknown processes. Different
-checkouts on different machines must use different owner identities if their
-loops are to operate independently.
+- A task is exactly one Job. Its Secret references are kept.
+- `target` names what the task changes, such as a database. One Lease per
+  target, in `taskLockNamespace`, makes sure only one task runs against it at
+  a time, across task names, owners and namespaces.
+- The Lease is released only when the Job reaches Complete or Failed. If a
+  run is interrupted, the next run takes over only once that exact Job has
+  finished. An expired Lease or a missing Job isn't enough, because the old
+  client may only be paused and could still create the Job. See
+  [troubleshooting](troubleshooting.md) for manual recovery.
+- `imageName`, `pushTarget` and `container` publish the current checkout and
+  inject its digest into that container (regular or init). Without them, the
+  Job's manifest must pin its own image.
 
 ## Lifecycle hooks
 
-`hooks.beforeUp` and `hooks.afterDown` name ordered lists of declared tasks.
-`hooks.deployables.<name>.beforeStart` and `afterStop` bind tasks to a Bazel
-metadata deployable. Unknown tasks, deployables and configuration fields fail
-before startup. Hook Jobs use the same publication, task target Lease, timeout,
-namespace and ownership boundaries as `dev task`.
+Hooks run declared tasks at startup and teardown:
 
-Startup first cleans up expired routes and selects deployables. With no
-selection it exits without hooks. Otherwise it writes a labelled lifecycle
-ConfigMap in the routing namespace, provisions explicit dependencies, runs
-`beforeUp`, then explicit tasks, publishes images, and runs each deployable's
-`beforeStart` immediately before creating or replacing its overlay. Routing,
-initial synchronization and the watch loop follow. A failed hook prevents its
-subsequent workload write; a failed `beforeUp` prevents image publication too.
-The marker exists before the first hook, so a failed start remains cleanable.
+```yaml
+hooks:
+  beforeUp: [tenant]
+  afterDown: [tenant-teardown]
+  deployables:
+    worker:
+      beforeStart: [worker-override-set]
+      afterStop: [worker-override-clear]
+```
 
-The marker records teardown task names, the original owner and selected
-services. Heartbeat renewal begins after the marker is written and continues during
-startup hooks, image publication and live sync; it includes this ConfigMap.
-The marker also records its checkout for exact local-owner shutdown during
-cleanup. Startup expiry maintenance protects its newly acquired local socket
-while tearing down a prior expired marker for the same checkout/route.
-`dev down` stops its local loop, lists owned Deployments and persists the
-discovered service names before deleting overlays with foreground propagation.
-It waits for each service's pods to disappear and records that stopping has
-completed. It runs the recorded service `afterStop` tasks, then
-`afterDown`, removes dependencies with `retention: down`, deletes task Jobs,
-and deletes the marker last. A failed wait or hook leaves the marker. A retry
-after stopping has completed runs the hooks without another overlay deletion.
-All hooks must be idempotent because any hook can run more than once.
+Hook Jobs follow the same rules as `dev task`. Unknown tasks, deployables or
+config keys fail before startup. **Hooks must be idempotent**, because retries
+can run any hook more than once.
 
-Cleanup groups resource expiries across all configured namespaces and uses the
-latest expiry for a route. Expired marked routes stop the recorded local owner,
-then use the same teardown and original owner. Missing recorded tasks produce
-a warning and leave every
-resource untouched. Routes from older CLIs without a marker retain delete-only
-cleanup. Status performs no hook work, leaves expired marked routes in place,
-and reports `teardownPending` for the current route. Cleanup is command-driven;
-there is no always-running reaper.
+Startup order:
+
+1. Clean up expired routes and select deployables. With nothing selected,
+   stop here.
+2. Write the route's lifecycle marker, a ConfigMap in the routing namespace.
+   From here on the route can always be cleaned up, even if startup fails.
+3. Provision `--dependency` dependencies.
+4. Run `beforeUp`, then `--task` tasks.
+5. Publish images.
+6. For each deployable, run `beforeStart`, then create its overlay.
+7. Set up routing, do the first sync, and start watching.
+
+A failed hook stops everything after it. Expiry renewal starts once the
+marker exists, so a long hook or build can't let the route expire.
+
+Teardown (`dev down`, or cleanup of an expired route):
+
+1. Stop the local `dev up` for that route.
+2. Save the list of deployed services in the marker, then delete overlays and
+   wait for their pods to go away.
+3. Run each service's `afterStop`, then `afterDown`.
+4. Delete `retention: down` dependencies and task Jobs.
+5. Delete the marker, last.
+
+If a step fails, the marker stays and a retry continues from where it
+stopped, without deleting overlays twice. A checkout that doesn't declare a
+recorded task skips that route with a warning and touches nothing. Routes from
+CLIs older than hooks have no marker and are simply deleted.
 
 ## Profiles and variables
 
-`variables` maps names matching `^[A-Z][A-Z0-9_]*$` to strings. A variable value
-may contain `${DEV_ROUTE}` and `${DEV_NAMESPACE}`; values resolve once using
-the route and routing namespace. Values cannot reference other DEV_VAR values.
-Workload templates, task Job manifests and dependency manifests substitute
-`${DEV_VAR_<NAME>}` alongside the existing direct route/namespace tokens. Direct
-`${DEV_NAMESPACE}` is the workload/task/dependency namespace. An unresolved
-DEV_VAR token is an error before that resource is mutated.
+```yaml
+variables:
+  DATABASE: tadoku
+profiles:
+  - name: isolated-database
+    whenChanged: [services/api/migrations/]
+    variables:
+      DATABASE: tadoku-${DEV_ROUTE}
+    hooks:
+      beforeUp: [migrate, tenant]
+```
 
-`profiles` is an ordered list with a unique nonempty `name` (excluding reserved
-`default`), nonempty repository-relative `whenChanged` prefixes, optional
-variable overrides and optional hook overrides. Only top-level variables may
-be overridden. The first profile whose literal prefix matches a changed path
-wins. The changed set includes committed changes from the comparison merge
-base, uncommitted changes and unignored untracked files. Without a match, the
-profile is `default`. Profiles replace only hook keys they specify; omitted
-keys inherit, and an explicit empty array clears that event. Deployable hook
-keys in every profile must name known Bazel metadata deployables.
+**Variables** have uppercase names (`^[A-Z][A-Z0-9_]*$`). Workload templates,
+task Jobs, dependency manifests and task targets use them as
+`${DEV_VAR_DATABASE}`. Values can contain `${DEV_ROUTE}` and
+`${DEV_NAMESPACE}` (the routing namespace) but not other variables. A
+`${DEV_NAMESPACE}` written directly in a manifest means that manifest's own
+namespace. An unknown variable fails before the resource is written. Values
+are stored as plain ConfigMap data, so use Secret references for credentials.
 
-Startup reports `profile=<name>`. The lifecycle marker stores that name and
-resolved variables; a live marker with a different profile or unequal
-resolved values makes startup fail with `run dev down first`. This preserves
-the original cleanup scope even if a later startup hook would fail. The
-refusal reports the route without exposing variable values. `dev task` and `dev provision` use a marker's profile
-and recorded values when present; otherwise they select from the changed files
-in the same way as startup. Down and expiry cleanup render recorded hook Jobs
-and removable dependency manifests with the marker's values, rather than the
-caller's configuration. Status shows the recorded profile. These values are
-plaintext ConfigMap data and must not carry credentials.
+**Profiles** are checked in order. The first one with a `whenChanged` prefix
+matching a changed path wins (committed, uncommitted or untracked). If none
+match, the profile is `default`, which is a reserved name. A profile overrides
+only the variables and hook keys it lists. An empty hook list turns that hook
+off.
 
-A task's `target` also substitutes route, its task namespace and resolved
-variables before Lease acquisition. Every lifecycle task for a route must use
-the same stable target; a target containing `${DEV_ROUTE}` creates a Lease per
-route. This does not change terminal-Job proof, compare-and-set acquisition or
-interruption recovery. Dependency readiness names keep their existing direct
-route substitution; profiles do not add readiness-expression templating.
+The marker stores the profile and resolved variables:
+
+- Startup prints `profile=<name>`, and `dev status` shows it.
+- A running route can't switch profile or variable values. Startup fails with
+  `run dev down first`, without printing the values.
+- `dev task`, `dev provision` and teardown use the stored values, even from a
+  checkout whose config differs.
+
+A task `target` such as `database/${DEV_ROUTE}` gives each route its own
+Lease. Every lifecycle task for a route must resolve to the same target.
+Dependency readiness names only substitute `${DEV_ROUTE}`.
+
+## Environment overrides
+
+A config file kept outside the repository can point the same deployable
+metadata at a different environment:
+
+```yaml
+manifestsRelativeTo: config      # load templates, tasks and dependencies next to this file
+hostTLS: gateway
+gatewayName: edge
+gatewayNamespace: gateway
+internalGatewayName: internal
+internalGatewayNamespace: routing
+deployables:
+  api:
+    namespace: prod-api
+    workloadTemplate: api.yaml
+    baseService: {name: api, namespace: prod-api, port: 80}
+    publicProxy: {name: oathkeeper-proxy, namespace: prod-auth, port: 4455}
+    internalHost: api-internal.prod-auth.svc.cluster.local
+    publicHost: preview.example.com
+```
+
+An override replaces only the fields it sets: `namespace`,
+`workloadTemplate`, `baseService`, `publicProxy`, `internalHost` and
+`publicHost`. Naming a deployable that the metadata doesn't have is an error.
+With `manifestsRelativeTo: config`, files resolve relative to the config file,
+with the same symlink-escape check. Git and Bazel still run in the checkout.
+
+## Production mode
+
+`mode: production` deploys a pushed commit as release images, by digest, next
+to an existing environment's base workloads:
+
+```yaml
+mode: production
+registry: ghcr.io/org/repo/branches     # must end in /branches
+bazelArgs: [--config=release]           # required
+refuseChangedPaths: [services/api/migrations/]
+hostTLS: gateway
+manifestsRelativeTo: config
+deployables:                            # every deployable needs a template
+  api: {workloadTemplate: api.yaml}
+```
+
+Each deployable's metadata must declare `release: {imageName, pushTarget}`,
+the repository's release entrypoint without a fixed repository or tags. The
+development `imageName`, `pushTarget`, `devCommand`, sync and dependency
+fields are ignored. Because every deployable needs a template override, no
+development template can reach production.
+
+**Before `up`, `task` or `provision` does anything,** the CLI refuses:
+
+- a dirty working tree;
+- a `HEAD` that no fetched `origin` branch contains;
+- changes under any `refuseChangedPaths` prefix;
+- a routing namespace without the labels `dev-cli.io/routing-enabled=true`
+  and `dev-cli.io/environment=production`.
+
+Development configs, in turn, refuse a namespace labelled production.
+
+**Every push**, including task images, must:
+
+- use the tag `<route>-<commit12>` (never `latest` or `prod`);
+- push one image directly under the configured registry;
+- use a push target whose `bazel query --output=build` sets neither
+  `repository` nor `remote_tags`. Otherwise a rules_oci `oci_push` with
+  `remote_tags` would still push `latest` and `prod`.
+
+`up` first looks for an existing `<registry>/<release.imageName>:<route>-<commit12>`
+and reuses it, since it names a clean, pushed commit. Otherwise it pushes and
+resolves the digest anonymously, which proves the cluster can pull it without
+a Secret.
+
+Overlays keep the template's command, arguments, probes, resources and
+security context. Only the image, labels and annotations change. There is no
+supervisor, sync, expiry renewal or HMR. `up` waits for every rollout and
+route, prints the route, commit, digests, branch URLs and expiry, then exits.
+Expiry is startup time plus `ttl`; rerun `up` to extend it. Teardown uses the
+same hooks as development. `dev doctor` also checks the namespace labels and
+Docker.
+
+## Local process and cleanup
+
+**One `dev up` per checkout and route.** On Linux and macOS an exclusive file
+lock enforces this before anything is published. A private Unix socket
+handles `status` and graceful stop. `dev down` asks the running `dev up` to
+stop and waits for it; it never signals a stored PID. After a crash, the
+kernel releases the lock and the next run reclaims the socket. Stop older
+CLIs before upgrading, since their PID files are ignored. Checkouts on
+different machines need different owners if they should run independently.
+
+**`dev down`** deletes only objects that match both your owner and route
+labels, including Backends and BackendTrafficPolicies.
+
+**Expiry cleanup** runs when `dev up` starts, when `dev status` runs, and on
+`dev cleanup`. Nothing runs it in the background. It looks at every owned
+resource kind in every configured namespace, so routing objects left behind
+by a deleted Deployment are still found, and it uses the latest expiry seen
+for a route. Expired routes with a marker get the full
+[teardown](#lifecycle-hooks) under their original owner.
+
+`dev status` never runs hooks. It leaves expired routes that have a marker in
+place and reports `teardownPending`.
