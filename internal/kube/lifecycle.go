@@ -13,6 +13,18 @@ import (
 
 const LifecycleLabel = "dev-cli.io/lifecycle-marker"
 
+// maxLifecycleBytes keeps the marker well under the 1 MiB ConfigMap limit.
+const maxLifecycleBytes = 768 << 10
+
+// Teardown is everything a full teardown needs, recorded at dev up, so a
+// route can be torn down from its marker alone: no checkout, config or Bazel.
+type Teardown struct {
+	Namespaces        []string                `json:"namespaces"`
+	TaskLockNamespace string                  `json:"taskLockNamespace"`
+	Tasks             map[string]RecordedTask `json:"tasks"`
+	Dependencies      []RecordedDependency    `json:"dependencies,omitempty"`
+}
+
 type Lifecycle struct {
 	Owner                                   string            `json:"-"`
 	Checkout                                string            `json:"checkout,omitempty"`
@@ -21,6 +33,7 @@ type Lifecycle struct {
 	Hooks                                   config.Hooks      `json:"hooks"`
 	Deployables                             []string          `json:"deployables,omitempty"`
 	OverlaysStopped                         bool              `json:"overlaysStopped,omitempty"`
+	Teardown                                *Teardown         `json:"teardown,omitempty"`
 	Branch, Revision, BaseRef, BaseRevision string            `json:"-"`
 	Expiry                                  time.Time         `json:"-"`
 }
@@ -78,6 +91,9 @@ func (c Client) WriteLifecycle(ctx context.Context, m Lifecycle, branch, revisio
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxLifecycleBytes {
+		return fmt.Errorf("lifecycle marker for route %s would be %d bytes, over the %d-byte limit (ConfigMaps hold at most 1 MiB); shrink the teardown task or retention: down dependency manifests", route, len(data), maxLifecycleBytes)
 	}
 	ls := labels(m.Owner, route, "lifecycle")
 	ls[LifecycleLabel] = "true"
