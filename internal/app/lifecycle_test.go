@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +111,7 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 		return nil, nil
 	}
 	if verb == "patch" {
-		return nil, r.patch(args)
+		return nil, r.patch(args, in)
 	}
 	if verb != "create" && verb != "replace" {
 		return nil, nil
@@ -151,15 +152,15 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 	return nil, nil
 }
 
-// patch applies a merge patch's data keys, the only kind dev-cli sends.
-func (r *lifecycleRunner) patch(args []string) error {
+// patch applies a merge patch's data keys, the only kind dev-cli sends. The
+// patch must arrive on stdin: a marker can exceed the kernel's per-argument limit.
+func (r *lifecycleRunner) patch(args []string, in io.Reader) error {
+	if !slices.Contains(args, "--patch-file=/dev/stdin") || in == nil {
+		return fmt.Errorf("patch not sent on stdin: %v", args)
+	}
 	var body struct{ Data map[string]string }
-	for i, arg := range args {
-		if arg == "-p" && i+1 < len(args) {
-			if err := json.Unmarshal([]byte(args[i+1]), &body); err != nil {
-				return err
-			}
-		}
+	if err := json.NewDecoder(in).Decode(&body); err != nil {
+		return err
 	}
 	k := args[3] + "/" + strings.ToLower(args[5]) + "/" + args[6]
 	var object map[string]any

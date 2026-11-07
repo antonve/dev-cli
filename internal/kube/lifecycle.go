@@ -101,7 +101,8 @@ func (c Client) SaveTeardown(ctx context.Context, route string, m Lifecycle) err
 	if err != nil {
 		return err
 	}
-	_, err = c.RunKubectl(ctx, []string{"patch", "configmap", naming.Resource("lifecycle", route), "--type=merge", "-p", string(patch)}, nil)
+	// On stdin: a marker can exceed the kernel's per-argument limit.
+	_, err = c.RunKubectl(ctx, []string{"patch", "configmap", naming.Resource("lifecycle", route), "--type=merge", "--patch-file=/dev/stdin"}, bytes.NewReader(patch))
 	return err
 }
 
