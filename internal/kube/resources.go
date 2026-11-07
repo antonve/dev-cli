@@ -140,12 +140,40 @@ func (c Client) ensureManaged(ctx context.Context, kind, name, managed, owner, r
 	return nil
 }
 
-func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route string) error {
-	c = c.In(d.Namespace)
+// RecordedDependency is a dependency with its manifest already rendered, so it
+// can be provisioned or removed without the checkout.
+type RecordedDependency struct {
+	Name      string             `json:"name"`
+	Namespace string             `json:"namespace"`
+	Retention string             `json:"retention"`
+	Readiness []config.Readiness `json:"readiness,omitempty"`
+	Objects   []map[string]any   `json:"objects"`
+}
+
+func (c Client) RenderDependency(d config.Dependency, route string) (RecordedDependency, error) {
 	objects, err := readObjects(c.ManifestRoot, d.Manifest, route, d.Namespace, c.Variables)
+	return RecordedDependency{Name: d.Name, Namespace: d.Namespace, Retention: d.Retention, Readiness: d.Readiness, Objects: objects}, err
+}
+
+// objects returns a private copy: provisioning annotates objects in place.
+func (d RecordedDependency) objects() []map[string]any {
+	b, _ := json.Marshal(d.Objects)
+	var objects []map[string]any
+	_ = json.Unmarshal(b, &objects)
+	return objects
+}
+
+func (c Client) Provision(ctx context.Context, d config.Dependency, owner, route string) error {
+	recorded, err := c.RenderDependency(d, route)
 	if err != nil {
 		return err
 	}
+	return c.ProvisionRecorded(ctx, recorded, owner, route)
+}
+
+func (c Client) ProvisionRecorded(ctx context.Context, d RecordedDependency, owner, route string) error {
+	c = c.In(d.Namespace)
+	objects := d.objects()
 	if err := prepareObjects(objects, d.Namespace, dependencyManaged, owner, route, d.Name); err != nil {
 		return err
 	}
@@ -236,11 +264,19 @@ func (c Client) RemoveDependency(ctx context.Context, d config.Dependency, owner
 	if d.Retention == "retain" {
 		return nil
 	}
-	c = c.In(d.Namespace)
-	objects, err := readObjects(c.ManifestRoot, d.Manifest, route, d.Namespace, c.Variables)
+	recorded, err := c.RenderDependency(d, route)
 	if err != nil {
 		return err
 	}
+	return c.RemoveRecorded(ctx, recorded, owner, route)
+}
+
+func (c Client) RemoveRecorded(ctx context.Context, d RecordedDependency, owner, route string) error {
+	if d.Retention != "down" {
+		return nil
+	}
+	c = c.In(d.Namespace)
+	objects := d.objects()
 	if err := prepareObjects(objects, d.Namespace, dependencyManaged, owner, route, d.Name); err != nil {
 		return err
 	}
@@ -450,20 +486,76 @@ func (c Client) holderJobState(ctx context.Context, holder string) (bool, bool, 
 	return true, terminal, err
 }
 
-func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, image, revision, owner, route string) error {
+// RecordedTask is a task Job rendered for one route: variables substituted
+// and its published image injected. Running it needs only the cluster.
+type RecordedTask struct {
+	Namespace    string         `json:"namespace"`
+	Target       string         `json:"target"`
+	Timeout      string         `json:"timeout"`
+	Dependencies []string       `json:"dependencies,omitempty"`
+	Image        string         `json:"image,omitempty"`
+	Job          map[string]any `json:"job"`
+}
+
+func (c Client) RenderTask(task config.Task, image, route string) (RecordedTask, error) {
 	target, err := substitute(task.Target, route, task.Namespace, c.Variables)
 	if err != nil {
-		return fmt.Errorf("task %s target: %w", task.Name, err)
+		return RecordedTask{}, fmt.Errorf("task %s target: %w", task.Name, err)
 	}
-	task.Target = target
-	timeout, _ := time.ParseDuration(task.Timeout)
-	c = c.In(task.Namespace)
 	objects, err := readObjects(c.ManifestRoot, task.Manifest, route, task.Namespace, c.Variables)
+	if err != nil {
+		return RecordedTask{}, err
+	}
+	if len(objects) != 1 || objects[0]["kind"] != "Job" {
+		return RecordedTask{}, fmt.Errorf("task %s manifest must contain exactly one batch/v1 Job", task.Name)
+	}
+	if image != "" {
+		spec, _ := objects[0]["spec"].(map[string]any)
+		if spec == nil {
+			return RecordedTask{}, fmt.Errorf("task %s Job has no spec", task.Name)
+		}
+		template, _ := spec["template"].(map[string]any)
+		if template == nil {
+			return RecordedTask{}, fmt.Errorf("task %s Job has no pod template", task.Name)
+		}
+		podSpec, _ := template["spec"].(map[string]any)
+		if podSpec == nil {
+			return RecordedTask{}, fmt.Errorf("task %s Job has no pod spec", task.Name)
+		}
+		found := false
+		for _, field := range []string{"containers", "initContainers"} {
+			containers, _ := podSpec[field].([]any)
+			for _, value := range containers {
+				container, _ := value.(map[string]any)
+				if container["name"] == task.Container {
+					container["image"] = image
+					found = true
+				}
+			}
+		}
+		if !found {
+			return RecordedTask{}, fmt.Errorf("task %s has no image container %q", task.Name, task.Container)
+		}
+	}
+	return RecordedTask{Namespace: task.Namespace, Target: target, Timeout: task.Timeout, Dependencies: task.Dependencies, Image: image, Job: objects[0]}, nil
+}
+
+func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, image, revision, owner, route string) error {
+	recorded, err := c.RenderTask(task, image, route)
 	if err != nil {
 		return err
 	}
-	if len(objects) != 1 || objects[0]["kind"] != "Job" {
-		return fmt.Errorf("task %s manifest must contain exactly one batch/v1 Job", task.Name)
+	return c.RunRecordedTask(ctx, task.Name, recorded, lockNamespace, revision, owner, route)
+}
+
+func (c Client) RunRecordedTask(ctx context.Context, taskName string, recorded RecordedTask, lockNamespace, revision, owner, route string) error {
+	task := config.Task{Name: taskName, Namespace: recorded.Namespace, Target: recorded.Target, Timeout: recorded.Timeout}
+	timeout, _ := time.ParseDuration(task.Timeout)
+	c = c.In(task.Namespace)
+	b, _ := json.Marshal(recorded.Job)
+	objects := []map[string]any{{}}
+	if err := json.Unmarshal(b, &objects[0]); err != nil || objects[0]["kind"] != "Job" {
+		return fmt.Errorf("task %s has no recorded Job", task.Name)
 	}
 	metadata, _ := objects[0]["metadata"].(map[string]any)
 	if metadata == nil {
@@ -479,34 +571,6 @@ func (c Client) RunTask(ctx context.Context, task config.Task, lockNamespace, im
 	annotations["dev-cli.io/source-revision"] = revision
 	annotations["dev-cli.io/owner-original"] = owner
 	metadata["annotations"] = annotations
-	if image != "" {
-		spec, _ := objects[0]["spec"].(map[string]any)
-		if spec == nil {
-			return fmt.Errorf("task %s Job has no spec", task.Name)
-		}
-		template, _ := spec["template"].(map[string]any)
-		if template == nil {
-			return fmt.Errorf("task %s Job has no pod template", task.Name)
-		}
-		podSpec, _ := template["spec"].(map[string]any)
-		if podSpec == nil {
-			return fmt.Errorf("task %s Job has no pod spec", task.Name)
-		}
-		found := false
-		for _, field := range []string{"containers", "initContainers"} {
-			containers, _ := podSpec[field].([]any)
-			for _, value := range containers {
-				container, _ := value.(map[string]any)
-				if container["name"] == task.Container {
-					container["image"] = image
-					found = true
-				}
-			}
-		}
-		if !found {
-			return fmt.Errorf("task %s has no image container %q", task.Name, task.Container)
-		}
-	}
 	if err := prepareObjects(objects, task.Namespace, taskManaged, owner, route, task.Name); err != nil {
 		return err
 	}

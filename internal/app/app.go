@@ -52,6 +52,8 @@ func flags(name string) (*flag.FlagSet, *common) {
 }
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: dev <doctor|up|provision|task|url|status|logs|down|cleanup|version> [options]")
+	fmt.Fprintln(w, "       dev down --headless --namespace <routing-namespace> --route <route> [--context <kube-context>]")
+	fmt.Fprintln(w, "       dev cleanup --headless --namespace <routing-namespace> [--context <kube-context>]")
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -67,18 +69,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	g := gitx.Git{Run: r}
-	root, err := g.Root(ctx)
-	if err != nil {
-		return err
-	}
-	if err := os.Chdir(root); err != nil {
-		return err
-	}
 	f, c := flags(args[0])
 	noWatch := false
 	urlHost := ""
 	var selectedServices, selectedDependencies, selectedTasks stringsFlag
+	var h headlessFlags
+	if args[0] == "down" || args[0] == "cleanup" {
+		h.register(f, args[0] == "down")
+	}
 	if args[0] == "url" {
 		f.StringVar(&urlHost, "host", "", "configured public host")
 	}
@@ -89,6 +87,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		f.Var(&selectedTasks, "task", "run a declared task before startup (repeatable)")
 	}
 	if err := f.Parse(args[1:]); err != nil {
+		return err
+	}
+	if h.set() {
+		return h.run(ctx, args[0], c, r, stdout)
+	}
+	g := gitx.Git{Run: r}
+	root, err := g.Root(ctx)
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(root); err != nil {
 		return err
 	}
 	service := ""
@@ -269,7 +278,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		for _, d := range ds {
 			deployableNames = append(deployableNames, d.Name)
 		}
-		if err := k.WriteLifecycle(ctx, kube.Lifecycle{Owner: c.owner, Checkout: root, Profile: profile, Variables: k.Variables, Hooks: cfg.Hooks, Deployables: deployableNames}, branch, rev, c.base, merge, route, expiry); err != nil {
+		lifecycle := kube.Lifecycle{Owner: c.owner, Checkout: root, Profile: profile, Variables: k.Variables, Hooks: cfg.Hooks, Deployables: deployableNames}
+		if marker != nil {
+			lifecycle.Teardown = marker.Teardown
+		}
+		if err := k.WriteLifecycle(ctx, lifecycle, branch, rev, c.base, merge, route, expiry); err != nil {
 			return err
 		}
 		loop := syncer.Loop{Bazel: bz, Kube: k, Config: cfg, Root: root, Route: route, TTL: ttl, KnownFiles: map[string]map[string]bool{}}
@@ -278,6 +291,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 			stopHeartbeat, heartbeatErrors := loop.StartHeartbeat(ctx, ds)
 			defer stopHeartbeat()
 			loop.HeartbeatErrors = heartbeatErrors
+		}
+		// Teardown images are published while the marker already guards the
+		// route, then recorded so the route can be torn down headlessly.
+		teardown, err := recordTeardown(ctx, k, bz, cfg, rev, route, stdout)
+		if err != nil {
+			return err
+		}
+		if err := saveTeardown(ctx, k, route, teardown); err != nil {
+			return err
 		}
 		for _, name := range selectedDependencies {
 			d, ok := cfg.Dependency(name)
@@ -521,20 +543,85 @@ func runHooks(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Con
 	return nil
 }
 
+// saveTeardown adds the teardown record to the marker's data only. The
+// heartbeat renews the expiry annotation meanwhile, and only up writes the
+// data, so patching the data can't lose a renewal.
+func saveTeardown(ctx context.Context, k kube.Client, route string, teardown *kube.Teardown) error {
+	current, err := k.ReadLifecycle(ctx, route)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return fmt.Errorf("lifecycle marker for route %s disappeared during startup", route)
+	}
+	current.Teardown = teardown
+	return k.SaveTeardown(ctx, route, *current)
+}
+
 func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, route string, w io.Writer) error {
+	return teardownRoute(ctx, k, &cfg, owner, route, w)
+}
+
+// teardownRoute tears a route down using the checkout's config, or, with a nil
+// cfg, headlessly: from the data recorded in its marker, under the marker's
+// owner.
+func teardownRoute(ctx context.Context, k kube.Client, cfg *config.Config, owner, route string, w io.Writer) error {
 	marker, err := k.ReadLifecycle(ctx, route)
 	if err != nil {
 		return err
+	}
+	if cfg == nil {
+		if marker == nil {
+			return fmt.Errorf("route %s has no lifecycle marker in namespace %s", route, k.Namespace)
+		}
+		if err := headlessReady(route, marker); err != nil {
+			return err
+		}
+		owner = marker.Owner
 	}
 	if marker != nil {
 		k.Variables = marker.Variables
 		if owner != marker.Owner {
 			return fmt.Errorf("route %s belongs to %s", route, marker.Owner)
 		}
+	}
+	if marker != nil && cfg != nil {
 		for _, name := range marker.Hooks.TaskNames() {
 			if _, ok := cfg.Task(name); !ok {
 				return fmt.Errorf("route %s recorded task %q is missing from config", route, name)
 			}
+		}
+	}
+	var namespaces []string
+	var runTasks func(tasks []string) error
+	var removeDependencies func() error
+	if cfg != nil {
+		namespaces = cfg.Namespaces
+		bz := bazel.New(k.Run, cfg.BazelArgs)
+		runTasks = func(tasks []string) error {
+			return runHooks(ctx, k, bz, *cfg, tasks, marker.Revision, owner, route, w)
+		}
+		removeDependencies = func() error {
+			for _, dependency := range cfg.Dependencies {
+				if err := k.RemoveDependency(ctx, dependency, owner, route); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	} else {
+		recorded := *marker.Teardown
+		namespaces = recorded.Namespaces
+		runTasks = func(tasks []string) error {
+			return runRecordedHooks(ctx, k, recorded, tasks, marker.Revision, owner, route, w)
+		}
+		removeDependencies = func() error {
+			for _, dependency := range recorded.Dependencies {
+				if err := k.RemoveRecorded(ctx, dependency, owner, route); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 	}
 	stopped := map[string]bool{}
@@ -544,7 +631,7 @@ func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, rout
 				stopped[name] = true
 			}
 		}
-		for _, namespace := range cfg.Namespaces {
+		for _, namespace := range namespaces {
 			list, err := k.In(namespace).List(ctx, kube.ManagedLabel+"=dev-cli,"+kube.OwnerLabel+"="+naming.Slug(owner, 40)+","+kube.RouteLabel+"="+route)
 			if err != nil {
 				return err
@@ -566,13 +653,13 @@ func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, rout
 				return err
 			}
 		}
-		for _, namespace := range cfg.Namespaces {
+		for _, namespace := range namespaces {
 			if err := k.In(namespace).Down(ctx, owner, route); err != nil {
 				return err
 			}
 		}
 		for _, name := range services {
-			for _, namespace := range cfg.Namespaces {
+			for _, namespace := range namespaces {
 				if err := k.In(namespace).WaitStopped(ctx, route, name); err != nil {
 					return err
 				}
@@ -587,22 +674,19 @@ func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, rout
 		}
 	}
 	if marker != nil {
-		bz := bazel.New(k.Run, cfg.BazelArgs)
 		for _, name := range marker.Deployables {
-			if err := runHooks(ctx, k, bz, cfg, marker.Hooks.Deployables[name].AfterStop, marker.Revision, owner, route, w); err != nil {
+			if err := runTasks(marker.Hooks.Deployables[name].AfterStop); err != nil {
 				return err
 			}
 		}
-		if err := runHooks(ctx, k, bz, cfg, marker.Hooks.AfterDown, marker.Revision, owner, route, w); err != nil {
+		if err := runTasks(marker.Hooks.AfterDown); err != nil {
 			return err
 		}
 	}
-	for _, dependency := range cfg.Dependencies {
-		if err := k.RemoveDependency(ctx, dependency, owner, route); err != nil {
-			return err
-		}
+	if err := removeDependencies(); err != nil {
+		return err
 	}
-	for _, namespace := range cfg.Namespaces {
+	for _, namespace := range namespaces {
 		if err := k.In(namespace).DeleteTasks(ctx, owner, route); err != nil {
 			return err
 		}

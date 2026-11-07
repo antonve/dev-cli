@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +110,9 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 		}
 		return nil, nil
 	}
+	if verb == "patch" {
+		return nil, r.patch(args, in)
+	}
 	if verb != "create" && verb != "replace" {
 		return nil, nil
 	}
@@ -146,6 +151,30 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 	}
 	return nil, nil
 }
+
+// patch applies a merge patch's data keys, the only kind dev-cli sends. The
+// patch must arrive on stdin: a marker can exceed the kernel's per-argument limit.
+func (r *lifecycleRunner) patch(args []string, in io.Reader) error {
+	if !slices.Contains(args, "--patch-file=/dev/stdin") || in == nil {
+		return fmt.Errorf("patch not sent on stdin: %v", args)
+	}
+	var body struct{ Data map[string]string }
+	if err := json.NewDecoder(in).Decode(&body); err != nil {
+		return err
+	}
+	k := args[3] + "/" + strings.ToLower(args[5]) + "/" + args[6]
+	var object map[string]any
+	if err := json.Unmarshal(r.objects[k], &object); err != nil {
+		return fmt.Errorf("patch of missing %s: %w", k, err)
+	}
+	data, _ := object["data"].(map[string]any)
+	for name, value := range body.Data {
+		data[name] = value
+	}
+	r.objects[k], _ = json.Marshal(object)
+	return nil
+}
+
 func jobTask(b []byte) string {
 	var o struct {
 		Metadata struct{ Labels map[string]string }

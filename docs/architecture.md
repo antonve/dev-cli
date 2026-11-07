@@ -273,6 +273,9 @@ Startup order:
    stop here.
 2. Write the route's lifecycle marker, a ConfigMap in the routing namespace.
    From here on the route can always be cleaned up, even if startup fails.
+   Then publish the images of the teardown tasks (`afterStop`, `afterDown`)
+   and record in the marker everything teardown needs (see
+   [headless teardown](#headless-teardown)).
 3. Provision `--dependency` dependencies.
 4. Run `beforeUp`, then `--task` tasks.
 5. Publish images.
@@ -282,9 +285,11 @@ Startup order:
 A failed hook stops everything after it. Expiry renewal starts once the
 marker exists, so a long hook or build can't let the route expire.
 
-Teardown (`dev down`, or cleanup of an expired route):
+Teardown (`dev down`, cleanup of an expired route, or their `--headless`
+forms):
 
-1. Stop the local `dev up` for that route.
+1. Stop the local `dev up` for that route. Headless teardown has no checkout
+   and skips this.
 2. Save the list of deployed services in the marker, then delete overlays and
    wait for their pods to go away.
 3. Run each service's `afterStop`, then `afterDown`.
@@ -295,6 +300,58 @@ If a step fails, the marker stays and a retry continues from where it
 stopped, without deleting overlays twice. A checkout that doesn't declare a
 recorded task skips that route with a warning and touches nothing. Routes from
 CLIs older than hooks have no marker and are simply deleted.
+
+### Headless teardown
+
+`dev down --headless` and `dev cleanup --headless` tear routes down from their
+markers alone, for example from a Kubernetes Job that has cluster credentials
+but no checkout, `.dev/config` or Bazel:
+
+```sh
+dev down --headless --namespace <routing-namespace> --route <route> [--context <kube-context>]
+dev cleanup --headless --namespace <routing-namespace> [--context <kube-context>]
+```
+
+They run the same teardown steps and checks, under the owner recorded in the
+marker; `--owner` and `--config` are refused. Without `--context`, kubectl
+uses the in-cluster or current context. `cleanup --headless` finds expired
+routes in the routing namespace, also honours a later expiry in any recorded
+namespace, and tears down only routes with a complete marker.
+
+The marker's `hooks.json` holds, besides the profile, variables, hooks and
+deployed services, a `teardown` record written by `dev up`:
+
+| Field | Contents |
+| --- | --- |
+| `namespaces` | The workload namespaces (`namespaces` in the config) |
+| `taskLockNamespace` | Where task Leases live |
+| `tasks.<name>` | Each `afterStop`/`afterDown` task: `namespace`, resolved `target`, `timeout`, `dependencies`, the published `image` digest, and the `job` manifest with variables substituted and that digest injected |
+| `dependencies` | `retention: down` dependencies and those teardown tasks use: `name`, `namespace`, `retention`, `readiness`, and the rendered `objects` |
+
+Headless teardown refuses, and leaves untouched, a route with no marker or a
+marker from an older CLI without this record; tear those down from their
+checkout. A marker over 768 KiB is refused at `dev up`, keeping it well under
+the 1 MiB ConfigMap limit. A running local `dev up` is not stopped; its next
+sync fails once the overlays are gone.
+
+The headless Job's ServiceAccount needs, in every recorded namespace: `get`,
+`list`, `watch` and `delete` on Deployments, Services, ConfigMaps, HTTPRoutes,
+Envoy Gateway Backends and BackendTrafficPolicies, and Ingresses; `get`,
+`list` and `watch` on Pods; and `get`, `list`, `watch`, `create` and `delete`
+on Jobs. In the routing namespace it also needs `create` and `update` on
+ConfigMaps (the marker), and in `taskLockNamespace` `get`, `create` and
+`update` on Leases. `retention: down` dependency kinds need `get` and
+`delete`, plus `create` and readiness `watch` if a teardown task depends on
+them.
+
+The repository's `Dockerfile` builds a minimal image: a static `dev`, a
+kubectl pinned by digest, no shell, running as a non-root user.
+
+```sh
+tag=registry.dev.example/dev-cli/dev:$(git rev-parse HEAD)
+docker build -t "$tag" . && docker push "$tag"
+docker buildx imagetools inspect "$tag"   # prints the digest to deploy
+```
 
 ## Profiles and variables
 
@@ -436,6 +493,9 @@ resource kind in every configured namespace, so routing objects left behind
 by a deleted Deployment are still found, and it uses the latest expiry seen
 for a route. Expired routes with a marker get the full
 [teardown](#lifecycle-hooks) under their original owner.
+
+`dev cleanup --headless` removes expired routes from their markers alone; see
+[headless teardown](#headless-teardown).
 
 `dev status` never runs hooks. It leaves expired routes that have a marker in
 place and reports `teardownPending`.

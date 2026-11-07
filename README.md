@@ -55,6 +55,8 @@ dev up --dependency db --task migrate
 dev provision db                # create a declared dependency
 dev task migrate                # run a declared task Job
 dev cleanup                     # remove expired environments
+dev down --headless --namespace ns --route r  # tear down from the cluster marker alone, no checkout
+dev cleanup --headless --namespace ns         # remove expired environments without a checkout
 ```
 
 `--service`, `--dependency` and `--task` can be repeated. Pass `--owner` or
