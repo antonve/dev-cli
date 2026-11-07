@@ -441,3 +441,53 @@ func TestMarkerKeepsExpiryRenewedDuringTeardownPublication(t *testing.T) {
 		t.Fatalf("marker expiry %s is not after publication finished at %s: the renewal was discarded", m.Expiry, r.published)
 	}
 }
+
+// heartbeatBetweenRunner renews the marker right after the first read that
+// follows the teardown image's publication, as a heartbeat landing between
+// saveTeardown's read and its write would.
+type heartbeatBetweenRunner struct {
+	*headlessRunner
+	published, renewed bool
+}
+
+const renewedExpiry = "2099-01-01T00:00:00Z"
+
+func (r *heartbeatBetweenRunner) Run(ctx context.Context, command string, args []string, in io.Reader) ([]byte, error) {
+	if command == "bazel" && slices.Contains(args, "//:push_hook") {
+		r.published = true
+	}
+	out, err := r.headlessRunner.Run(ctx, command, args, in)
+	marker := command == "kubectl" && len(args) > 6 && args[4] == "get" && args[5] == "configmap" && strings.HasPrefix(args[6], "lifecycle-")
+	if marker && r.published && !r.renewed {
+		r.renewed = true
+		for key, b := range r.objects {
+			if strings.Contains(key, "/configmap/lifecycle-") {
+				var object map[string]any
+				_ = json.Unmarshal(b, &object)
+				object["metadata"].(map[string]any)["annotations"].(map[string]any)["dev-cli.io/expires-at"] = renewedExpiry
+				r.objects[key], _ = json.Marshal(object)
+			}
+		}
+	}
+	return out, err
+}
+
+func TestTeardownRecordDoesNotOverwriteAConcurrentRenewal(t *testing.T) {
+	base, _ := headlessFixture(t)
+	r := &heartbeatBetweenRunner{headlessRunner: base}
+
+	var out bytes.Buffer
+	err := run(context.Background(), []string{"up", "--config", "config.json", "--owner", "alice", "--no-watch"}, &out, &out, r)
+	if err == nil || err.Error() != "overlay boundary" {
+		t.Fatalf("up did not reach the overlay boundary: %v\n%s", err, out.String())
+	}
+
+	route := naming.RouteKey("alice", "feature/hooks")
+	m, err := (kube.Client{Run: base, Context: "dev", Namespace: "ns"}).ReadLifecycle(context.Background(), route)
+	if err != nil || m == nil || m.Teardown == nil {
+		t.Fatalf("marker = %+v, %v", m, err)
+	}
+	if !r.renewed || m.Expiry.UTC().Format(time.RFC3339) != renewedExpiry {
+		t.Fatalf("marker expiry %s, want the concurrent renewal %s", m.Expiry.UTC().Format(time.RFC3339), renewedExpiry)
+	}
+}

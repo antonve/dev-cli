@@ -543,26 +543,19 @@ func runHooks(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Con
 	return nil
 }
 
-// saveTeardown adds the teardown record to the marker as it is now, keeping
-// the expiry the heartbeat may have renewed while the images were published.
-// A heartbeat can still annotate the marker between read and replace, so a
-// conflict is retried from a fresh read.
+// saveTeardown adds the teardown record to the marker's data only. The
+// heartbeat renews the expiry annotation meanwhile, and only up writes the
+// data, so patching the data can't lose a renewal.
 func saveTeardown(ctx context.Context, k kube.Client, route string, teardown *kube.Teardown) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		var current *kube.Lifecycle
-		if current, err = k.ReadLifecycle(ctx, route); err != nil {
-			return err
-		}
-		if current == nil {
-			return fmt.Errorf("lifecycle marker for route %s disappeared during startup", route)
-		}
-		current.Teardown = teardown
-		if err = k.SaveLifecycle(ctx, route, *current); err == nil {
-			return nil
-		}
+	current, err := k.ReadLifecycle(ctx, route)
+	if err != nil {
+		return err
 	}
-	return err
+	if current == nil {
+		return fmt.Errorf("lifecycle marker for route %s disappeared during startup", route)
+	}
+	current.Teardown = teardown
+	return k.SaveTeardown(ctx, route, *current)
 }
 
 func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, route string, w io.Writer) error {

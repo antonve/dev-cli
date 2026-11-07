@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,9 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 		}
 		return nil, nil
 	}
+	if verb == "patch" {
+		return nil, r.patch(args)
+	}
 	if verb != "create" && verb != "replace" {
 		return nil, nil
 	}
@@ -146,6 +150,30 @@ func (r *lifecycleRunner) Run(_ context.Context, command string, args []string, 
 	}
 	return nil, nil
 }
+
+// patch applies a merge patch's data keys, the only kind dev-cli sends.
+func (r *lifecycleRunner) patch(args []string) error {
+	var body struct{ Data map[string]string }
+	for i, arg := range args {
+		if arg == "-p" && i+1 < len(args) {
+			if err := json.Unmarshal([]byte(args[i+1]), &body); err != nil {
+				return err
+			}
+		}
+	}
+	k := args[3] + "/" + strings.ToLower(args[5]) + "/" + args[6]
+	var object map[string]any
+	if err := json.Unmarshal(r.objects[k], &object); err != nil {
+		return fmt.Errorf("patch of missing %s: %w", k, err)
+	}
+	data, _ := object["data"].(map[string]any)
+	for name, value := range body.Data {
+		data[name] = value
+	}
+	r.objects[k], _ = json.Marshal(object)
+	return nil
+}
+
 func jobTask(b []byte) string {
 	var o struct {
 		Metadata struct{ Labels map[string]string }

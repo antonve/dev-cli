@@ -79,6 +79,35 @@ func (c Client) ReadLifecycle(ctx context.Context, route string) (*Lifecycle, er
 }
 
 func (c Client) WriteLifecycle(ctx context.Context, m Lifecycle, branch, revision, baseRef, baseRevision, route string, expiry time.Time) error {
+	data, err := lifecycleData(m, route)
+	if err != nil {
+		return err
+	}
+	ls := labels(m.Owner, route, "lifecycle")
+	ls[LifecycleLabel] = "true"
+	marker := map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": naming.Resource("lifecycle", route), "namespace": c.Namespace, "labels": ls, "annotations": annotations(m.Owner, branch, revision, baseRef, baseRevision, "", expiry, time.Now().UTC().Format(time.RFC3339))}, "data": map[string]any{"hooks.json": string(data)}}
+	return c.writeOwnedObjects(ctx, []any{marker}, m.Owner, route)
+}
+
+// SaveTeardown rewrites only the marker's data from m, which the caller read
+// with ReadLifecycle. The annotations, including the expiry the heartbeat
+// renews, are left alone, so a concurrent renewal can't be lost.
+func (c Client) SaveTeardown(ctx context.Context, route string, m Lifecycle) error {
+	data, err := lifecycleData(m, route)
+	if err != nil {
+		return err
+	}
+	patch, err := json.Marshal(map[string]any{"data": map[string]string{"hooks.json": string(data)}})
+	if err != nil {
+		return err
+	}
+	_, err = c.RunKubectl(ctx, []string{"patch", "configmap", naming.Resource("lifecycle", route), "--type=merge", "-p", string(patch)}, nil)
+	return err
+}
+
+// lifecycleData is the marker's hooks.json: only teardown hooks are recorded,
+// and values kept in annotations are left out.
+func lifecycleData(m Lifecycle, route string) ([]byte, error) {
 	if m.Profile == "" {
 		m.Profile = "default"
 	}
@@ -90,15 +119,12 @@ func (c Client) WriteLifecycle(ctx context.Context, m Lifecycle, branch, revisio
 	m.Branch, m.Revision, m.BaseRef, m.BaseRevision, m.Expiry = "", "", "", "", time.Time{}
 	data, err := json.Marshal(m)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(data) > maxLifecycleBytes {
-		return fmt.Errorf("lifecycle marker for route %s would be %d bytes, over the %d-byte limit (ConfigMaps hold at most 1 MiB); shrink the teardown task or retention: down dependency manifests", route, len(data), maxLifecycleBytes)
+		return nil, fmt.Errorf("lifecycle marker for route %s would be %d bytes, over the %d-byte limit (ConfigMaps hold at most 1 MiB); shrink the teardown task or retention: down dependency manifests", route, len(data), maxLifecycleBytes)
 	}
-	ls := labels(m.Owner, route, "lifecycle")
-	ls[LifecycleLabel] = "true"
-	marker := map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": naming.Resource("lifecycle", route), "namespace": c.Namespace, "labels": ls, "annotations": annotations(m.Owner, branch, revision, baseRef, baseRevision, "", expiry, time.Now().UTC().Format(time.RFC3339))}, "data": map[string]any{"hooks.json": string(data)}}
-	return c.writeOwnedObjects(ctx, []any{marker}, m.Owner, route)
+	return data, nil
 }
 
 func (c Client) SaveLifecycle(ctx context.Context, route string, m Lifecycle) error {
