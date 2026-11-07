@@ -347,9 +347,14 @@ them.
 The repository's `Dockerfile` builds a minimal image: a static `dev`, a
 kubectl pinned by digest, no shell, running as a non-root user.
 
+Push a single-platform image manifest, not an index with attestations: some
+registries keep an index but not the manifests it points to, which makes the
+image impossible to pull.
+
 ```sh
 tag=registry.dev.example/dev-cli/dev:$(git rev-parse HEAD)
-docker build -t "$tag" . && docker push "$tag"
+docker buildx build --provenance=false --sbom=false --platform linux/amd64 \
+  --output "type=registry,name=$tag" .
 docker buildx imagetools inspect "$tag"   # prints the digest to deploy
 ```
 
