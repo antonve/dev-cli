@@ -294,15 +294,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, r execx.R
 		}
 		// Teardown images are published while the marker already guards the
 		// route, then recorded so the route can be torn down headlessly.
-		if lifecycle.Teardown, err = recordTeardown(ctx, k, bz, cfg, rev, route, stdout); err != nil {
+		teardown, err := recordTeardown(ctx, k, bz, cfg, rev, route, stdout)
+		if err != nil {
 			return err
 		}
-		// ponytail: one retry covers a heartbeat annotating the marker between
-		// get and replace; loop on conflicts if heartbeats ever get faster.
-		if err := k.WriteLifecycle(ctx, lifecycle, branch, rev, c.base, merge, route, expiry); err != nil {
-			if err := k.WriteLifecycle(ctx, lifecycle, branch, rev, c.base, merge, route, expiry); err != nil {
-				return err
-			}
+		if err := saveTeardown(ctx, k, route, teardown); err != nil {
+			return err
 		}
 		for _, name := range selectedDependencies {
 			d, ok := cfg.Dependency(name)
@@ -544,6 +541,28 @@ func runHooks(ctx context.Context, k kube.Client, bz bazel.Bazel, cfg config.Con
 		}
 	}
 	return nil
+}
+
+// saveTeardown adds the teardown record to the marker as it is now, keeping
+// the expiry the heartbeat may have renewed while the images were published.
+// A heartbeat can still annotate the marker between read and replace, so a
+// conflict is retried from a fresh read.
+func saveTeardown(ctx context.Context, k kube.Client, route string, teardown *kube.Teardown) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var current *kube.Lifecycle
+		if current, err = k.ReadLifecycle(ctx, route); err != nil {
+			return err
+		}
+		if current == nil {
+			return fmt.Errorf("lifecycle marker for route %s disappeared during startup", route)
+		}
+		current.Teardown = teardown
+		if err = k.SaveLifecycle(ctx, route, *current); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func teardown(ctx context.Context, k kube.Client, cfg config.Config, owner, route string, w io.Writer) error {

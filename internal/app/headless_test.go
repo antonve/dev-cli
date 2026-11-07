@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -377,5 +379,65 @@ func TestOversizedMarkerIsRefused(t *testing.T) {
 	}
 	if eventIndex(r.events, "overlay") >= 0 {
 		t.Fatalf("startup continued past an unrecordable teardown: %v", r.events)
+	}
+}
+
+// slowPublishRunner makes the teardown image's publication outlast the TTL
+// while the heartbeat renews the marker's expiry, as a slow Bazel push would.
+type slowPublishRunner struct {
+	*headlessRunner
+	mu        sync.Mutex
+	published time.Time
+}
+
+func (r *slowPublishRunner) Run(ctx context.Context, command string, args []string, in io.Reader) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if command == "kubectl" && len(args) > 5 && args[4] == "annotate" {
+		for _, arg := range args {
+			if expiry, ok := strings.CutPrefix(arg, "dev-cli.io/expires-at="); ok {
+				for key, b := range r.objects {
+					if strings.Contains(key, "/configmap/lifecycle-") {
+						var object map[string]any
+						_ = json.Unmarshal(b, &object)
+						object["metadata"].(map[string]any)["annotations"].(map[string]any)["dev-cli.io/expires-at"] = expiry
+						r.objects[key], _ = json.Marshal(object)
+					}
+				}
+			}
+		}
+		return nil, nil
+	}
+	if command == "bazel" && slices.Contains(args, "//:push_hook") && r.published.IsZero() {
+		r.mu.Unlock()
+		time.Sleep(1500 * time.Millisecond)
+		r.mu.Lock()
+		defer func() { r.published = time.Now() }()
+	}
+	return r.headlessRunner.Run(ctx, command, args, in)
+}
+
+func TestMarkerKeepsExpiryRenewedDuringTeardownPublication(t *testing.T) {
+	base, cfg := headlessFixture(t)
+	cfg.TTL = "1s"
+	b, _ := json.Marshal(cfg)
+	if err := os.WriteFile("config.json", b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &slowPublishRunner{headlessRunner: base}
+
+	var out bytes.Buffer
+	err := run(context.Background(), []string{"up", "--config", "config.json", "--owner", "alice", "--no-watch"}, &out, &out, r)
+	if err == nil || err.Error() != "overlay boundary" {
+		t.Fatalf("up did not reach the overlay boundary: %v\n%s", err, out.String())
+	}
+
+	route := naming.RouteKey("alice", "feature/hooks")
+	m, err := (kube.Client{Run: base, Context: "dev", Namespace: "ns"}).ReadLifecycle(context.Background(), route)
+	if err != nil || m == nil || m.Teardown == nil {
+		t.Fatalf("marker = %+v, %v", m, err)
+	}
+	if r.published.IsZero() || !m.Expiry.After(r.published) {
+		t.Fatalf("marker expiry %s is not after publication finished at %s: the renewal was discarded", m.Expiry, r.published)
 	}
 }
